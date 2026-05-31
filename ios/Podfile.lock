@@ -132,7 +132,7 @@ PODS:
   - PromisesObjC (2.4.0)
   - record_darwin (1.0.0):
     - Flutter
-  - RTCRoomEngine/Professional (3.5.2):
+  - RTCRoomEngine/Professional (3.5.7):
     - TXIMSDK_Plus_iOS_XCFramework (>= 8.4.6676)
     - TXLiteAVSDK_Professional (>= 12.8.0.19666)
   - SDWebImage (5.21.7):
@@ -183,7 +183,7 @@ PODS:
     - TUICore/Base
     - TXIMSDK_Plus_iOS_XCFramework
   - TXCustomBeautyProcesserPlugin (1.0.2)
-  - TXIMSDK_Plus_iOS_XCFramework (8.9.7511)
+  - TXIMSDK_Plus_iOS_XCFramework (8.9.7540)
   - TXLiteAVSDK_Professional (12.9.20085):
     - TXLiteAVSDK_Professional/Professional (= 12.9.20085)
   - TXLiteAVSDK_Professional/Professional (12.9.20085)
@@ -365,7 +365,7 @@ SPEC CHECKSUMS:
   permission_handler_apple: 4ed2196e43d0651e8ff7ca3483a069d469701f2d
   PromisesObjC: f5707f49cb48b9636751c5b2e7d227e43fba9f47
   record_darwin: fb1f375f1d9603714f55b8708a903bbb91ffdb0a
-  RTCRoomEngine: 9479e12a587099daa2ee35b6513a9a1bd98e3bf6
+  RTCRoomEngine: 45e2016ecc6109b309ddf3f29032fc1362d9cbe2
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
   SnapKit: d612e99e678a2d3b95bf60b0705ed0a35c03484a
@@ -380,7 +380,7 @@ SPEC CHECKSUMS:
   tencent_rtc_sdk: 4255c990b0cd74bdf832f76df6ff7d0c94b961dc
   TUICore: 7360e867205b38f72974e42d094fbb06ea68fe1e
   TXCustomBeautyProcesserPlugin: 099393b941cb40eda12b3a80bf6c0319957b1cfd
-  TXIMSDK_Plus_iOS_XCFramework: 10893791aa5c27b2b689ae3547878d10aeea9b7b
+  TXIMSDK_Plus_iOS_XCFramework: 0dc0d5df48de5693b74d0fc42e267ed4e5c3a247
   TXLiteAVSDK_Professional: 8cf38407bed4271f03389eecba30fbb64017ff49
   url_launcher_ios: 7a95fa5b60cc718a708b8f2966718e93db0cef1b
   video_player_avfoundation: dd410b52df6d2466a42d28550e33e4146928280a

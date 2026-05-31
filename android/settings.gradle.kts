@@ -18,6 +18,8 @@ pluginManagement {
         maven { url = uri("https://maven.aliyun.com/repository/jcenter") }
         // 🔴 腾讯云 TRTC/IM SDK Maven 仓库
         maven { url = uri("https://mirrors.tencent.com/nexus/repository/maven-public/") }
+        // 🔴 JitPack 仓库（flutter_sound_core 等依赖）
+        maven { url = uri("https://jitpack.io") }
         // 备用原始源
         google()
         mavenCentral()

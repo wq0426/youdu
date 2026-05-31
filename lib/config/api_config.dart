@@ -13,11 +13,11 @@ class ApiConfig {
   //   - macOS: 使用 192.168.1.20 (HTTP 8180/8181)
   //   - Windows: 使用 192.168.1.6 (HTTP 8180/8181)
   // Release模式: 
-  //   - 国内: 使用 www.xn--wxtp0q.com (HTTPS 8280/8281)
-  //   - 海外: 使用 www.xn--wxtp0q.com (HTTPS 8180/8181)
+  //   - 国内: 使用 abc.hb.cn (HTTPS 8280/8281)
+  //   - 海外: 使用 abc.hb.cn (HTTPS 8180/8181)
   static String get defaultHost {
     if (!kDebugMode) {
-      return 'youdu.app';
+      return 'abc.hb.cn';
     } else {
       // Debug 模式下根据平台选择不同的本地服务器
       // 注意：在 macOS 上编译 iOS 应用时，Platform.isMacOS 为 false，Platform.isIOS 为 true

@@ -9,6 +9,8 @@ allprojects {
         maven { url = uri("https://mirrors.tencent.com/nexus/repository/maven-public/") }
         // 🔴 华为 HMS 推送 Maven 仓库
         maven { url = uri("https://developer.huawei.com/repo/") }
+        // 🔴 JitPack 仓库（flutter_sound_core 等依赖）
+        maven { url = uri("https://jitpack.io") }
         // 备用原始源
         google()
         mavenCentral()
