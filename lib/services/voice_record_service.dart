@@ -1,15 +1,12 @@
 // 语音录制服务 - 平台自适应
 //
 // 策略：
-// - iOS：使用 record 包（更稳定）
-// - Android：使用 flutter_sound（原有实现）
+// - iOS/Android：使用 record 包
 // - 桌面端（Windows/Linux/macOS）：使用桌面端实现（stub，不支持录音）
-//
-// 使用运行时平台检测来选择实现
 
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'voice_record_service_mobile.dart' as mobile;
+import 'voice_record_service_mobile_impl.dart' as mobile;
 import 'voice_record_service_desktop.dart' as desktop;
 import 'voice_record_service_ios.dart' as ios;
 
@@ -31,15 +28,13 @@ bool _isIOSPlatform() {
 /// 语音录制服务
 /// 
 /// 根据运行平台自动选择实现：
-/// - iOS: 使用 record 包
-/// - Android: 使用 flutter_sound
+/// - iOS: 使用 record 包（ios 实现）
+/// - Android: 使用 record 包（mobile 实现）
 /// - 桌面端: stub
 class VoiceRecordService {
   static VoiceRecordService? _instance;
   
-  // 内部实现
   dynamic _impl;
-  // iOS 专用实现
   ios.VoiceRecordServiceIOS? _iosImpl;
   
   factory VoiceRecordService() {
@@ -49,21 +44,17 @@ class VoiceRecordService {
   
   VoiceRecordService._internal() {
     if (_isIOSPlatform()) {
-      // iOS 使用 record 包
       _iosImpl = ios.VoiceRecordServiceIOS();
       _impl = null;
     } else if (_isMobilePlatform()) {
-      // Android 使用 flutter_sound
       _impl = mobile.VoiceRecordService();
       _iosImpl = null;
     } else {
-      // 桌面端
       _impl = desktop.VoiceRecordService();
       _iosImpl = null;
     }
   }
 
-  // 代理所有方法和属性到内部实现
   bool get isRecording {
     if (_iosImpl != null) return _iosImpl!.isRecording;
     return _impl.isRecording;
@@ -75,11 +66,10 @@ class VoiceRecordService {
   }
   
   bool get isInited {
-    if (_iosImpl != null) return true; // iOS 实现不需要显式初始化状态
+    if (_iosImpl != null) return true;
     return _impl.isInited;
   }
-  
-  // 回调转发
+
   Function(int seconds)? get onDurationUpdate {
     if (_iosImpl != null) return _iosImpl!.onDurationUpdate;
     return _impl.onDurationUpdate;
@@ -152,7 +142,6 @@ class VoiceRecordService {
     Function(int uploaded, int total)? onProgress,
   }) {
     if (_isIOSPlatform()) {
-      // iOS 使用专用上传
       return ios.VoiceRecordServiceIOS.uploadVoice(
         token: token,
         filePath: filePath,
