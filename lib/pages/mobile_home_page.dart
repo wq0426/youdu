@@ -21,7 +21,6 @@ import '../services/image_preload_service.dart';
 import '../services/background_service.dart';
 import '../services/message_sync_service.dart';
 import '../services/callkit_service.dart';
-import '../services/tuicallkit_service.dart';
 import '../services/network_manager.dart';
 import '../config/feature_config.dart';
 import '../config/api_config.dart';
@@ -3160,21 +3159,21 @@ class _MobileHomePageState extends State<MobileHomePage>
     };
 
     // 设置来电回调
-    // 🔴 所有来电（包括 PC 端和移动端）都使用 TUICallKit 标准 av_call 信令
-    // TUICallKit 内置 UI 会自动处理来电显示，不需要自定义弹窗
+    // 🔴 已从 TUICallKit 迁移到 Agora，Agora 无内置来电 UI，需主动弹出来电界面
     _agoraService.onIncomingCall = (userId, displayName, callType) {
       logger.debug('📞 Agora 来电回调被触发 - 用户: $displayName ($userId)');
-      logger.debug('📞 TUICallKit 内置 UI 已启用，来电由 TUICallKit 自动处理');
-      // 🔴 仅保存通话状态信息，用于后续处理（如通话结束消息发送）
+      // 🔴 保存通话状态信息，用于后续处理（如通话结束消息发送）
       _currentCallUserId = userId;
       _currentCallType = callType;
       _isInGroupCall = false;
       _currentGroupCallId = null;
+      // 🔴 主动弹出一对一来电界面（播铃声 / iOS 后台走 CallKit / 前台弹对话框）
+      _showIncomingCallDialog(userId, displayName, callType);
     };
 
-    // 🔴 新增：TUICallKit 来电回调（用于准备遮盖层显示）
+    // 🔴 来电回调（用于准备遮盖层显示）
     _agoraService.onTUICallReceived = (callerId, callerIdStr, callType, isGroupCall, calleeIdList) async {
-      logger.debug('📞 [HomePage] TUICallKit 来电回调 - callerId: $callerId, callType: $callType');
+      logger.debug('📞 [HomePage] 来电回调 - callerId: $callerId, callType: $callType');
       logger.debug('📞 [HomePage] 是否群组通话: $isGroupCall, 被叫用户数: ${calleeIdList.length}');
       
       // 🔴 如果是群组通话，设置群组通话标志
@@ -3228,7 +3227,7 @@ class _MobileHomePageState extends State<MobileHomePage>
     };
 
     // 🔴 修复：设置群组来电回调
-    // 🔴 来自 PC 端的群组来电需要显示自定义弹窗（因为不是通过 TUICallKit 信令发送的）
+    // 🔴 来自 PC 端的群组来电需要显示自定义弹窗
     _agoraService.onIncomingGroupCall =
         (
           int userId,
@@ -3242,7 +3241,7 @@ class _MobileHomePageState extends State<MobileHomePage>
           logger.debug('📞 成员数量: ${members.length}');
           
           // 🔴 来自 PC 端的群组来电需要显示自定义弹窗
-          // 因为这是通过 WebSocket 发送的，TUICallKit 不会自动处理
+          // 因为这是通过 WebSocket 发送的，需要自定义处理
           logger.debug('📞 显示群组来电弹窗');
           _showIncomingGroupCallDialog(
             userId,
@@ -3386,51 +3385,14 @@ class _MobileHomePageState extends State<MobileHomePage>
       _isInGroupCall = true;
       _currentGroupCallId = groupId;
       _currentCallType = callType;
-      
-      // 导航到通话页面
-      logger.debug('📞 [MobileHomePage] 导航到群组通话页面...');
-      
-      try {
-        final navigator = Navigator.of(context);
-        
-        // 获取第一个被叫用户作为显示
-        final targetUserId = userIds.isNotEmpty ? userIds.first : 0;
-        final targetDisplayName = displayNames.isNotEmpty ? displayNames.first : '群组通话';
-        
-        logger.debug('🔴🔴🔴 [VoiceCallPage-群组通话发起] 打开VoiceCallPage');
-        logger.debug('🔴🔴🔴 [VoiceCallPage-群组通话发起] targetUserId=$targetUserId, targetDisplayName=$targetDisplayName, type=$callType, groupId=$groupId');
-        
-        final result = await navigator.push(
-          MaterialPageRoute(
-            builder: (context) {
-              return VoiceCallPage(
-                targetUserId: targetUserId,
-                targetDisplayName: targetDisplayName,
-                callType: callType,
-                isIncoming: false,  // 发起方，不是来电
-                groupId: groupId,
-                groupCallUserIds: userIds,
-                groupCallDisplayNames: displayNames,
-              );
-            },
-          ),
-        );
-        
-        logger.debug('📞 [MobileHomePage] 群组通话页面返回，结果: $result');
-        
-        // 通话页面关闭后，刷新主页面状态
-        if (mounted) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              _chatListKey.currentState?.refresh();
-              setState(() {});
-            }
-          });
-        }
-      } catch (e, stackTrace) {
-        logger.debug('❌ [MobileHomePage] 导航到群组通话页面失败: $e');
-        logger.debug('❌ [MobileHomePage] 堆栈跟踪: $stackTrace');
-      }
+
+      // 🔴 不在此处再导航到通话页面：
+      // 移动端群组通话页面已由发起入口（聊天页 _startGroupCall push GroupVideoCallPage）
+      // 或接听入口（来电弹窗接听后打开 VoiceCallPage）打开，且页面内部已自行发起呼叫。
+      // 此回调是“已进入频道”的副作用通知，若在这里再 push 一个页面，会导致
+      // 重复打开通话页 + 重复发起呼叫（Agora -17 ERR_JOIN_CHANNEL_REJECTED），
+      // 进而出现发送方页面关不掉、接收方状态卡住等问题。
+      logger.debug('📞 [MobileHomePage] 群组通话已进入频道，页面由发起/接听入口管理，跳过重复导航');
     };
 
     // 设置通话结束回调
@@ -3520,7 +3482,7 @@ class _MobileHomePageState extends State<MobileHomePage>
           logger.debug('  - lastGroupId (保存的): $lastGroupId');
           logger.debug('  - lastCallType (保存的): $lastCallType');
 
-          // 🔴 使用回调开始时保存的 lastGroupId（支持 TUICallKit 发起的群组通话）
+          // 🔴 使用回调开始时保存的 lastGroupId（支持群组通话）
           final effectiveGroupId = lastGroupId ?? _currentGroupCallId;
           final effectiveCallType = lastCallType ?? _currentCallType ?? CallType.voice;
 
@@ -3617,7 +3579,7 @@ class _MobileHomePageState extends State<MobileHomePage>
       await _sendCallCancelledMessage(targetUserId, callType, isCaller: isCaller);
     };
 
-    // 🔴 新增：设置接收方拒绝通话回调（通过 TUICallKit 内置 UI 拒绝时触发）
+    // 🔴 新增：设置接收方拒绝通话回调（接收方拒绝时触发）
     _agoraService.onCallRejectedByMe = (int callerUserId, CallType callType) async {
       logger.debug('📞 [Mobile] 接收方拒绝通话回调被触发');
       logger.debug('  - 发起方用户ID: $callerUserId');
@@ -8123,10 +8085,10 @@ class _MobileChatListPageState extends State<MobileChatListPage> {
       );
 
       // 🔴 关键修复：如果是通话发起消息（join_voice_button/join_video_button），保存群组ID
-      // 这样当 TUICallKit 来电回调触发时，我们就知道是哪个群组的通话
+      // 这样当来电回调触发时，我们就知道是哪个群组的通话
       if (messageType == 'join_voice_button' || messageType == 'join_video_button') {
         logger.debug('📞 [HomePage] 收到群组通话发起消息，保存群组ID: $groupId');
-        // 🔴 通知 tuicallkit_service 保存群组ID（使用单例访问）
+        // 🔴 保存群组ID（使用单例访问）
         AgoraService().setCurrentGroupId(groupId);
       }
 

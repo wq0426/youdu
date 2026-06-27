@@ -50,14 +50,12 @@ import 'package:collection/collection.dart';
 import 'package:http/http.dart' as http;
 import 'package:gal/gal.dart';
 import 'package:native_exif/native_exif.dart'; // 修改图片EXIF信息
-import 'package:tencent_calls_uikit/tencent_calls_uikit.dart'; // 🔴 导入 TUICallKit
 // import 'package:url_launcher/url_launcher.dart'; // TODO: Add url_launcher package when needed
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
 import '../services/agora_service.dart';
-import '../services/tuicallkit_service.dart'; // 🔴 导入 TUICallKitService
 import '../services/network_manager.dart'; // 🔴 添加网络监听服务
 import 'package:youdu/services/video_upload_service.dart';
 import '../constants/upload_limits.dart';
@@ -4655,12 +4653,20 @@ class _MobileChatPageState extends State<MobileChatPage>
           }
         }
 
-        // 一对一语音通话
-        if (_agoraService != null) {
-          // 🔴 使用 TUICallKit 内置 UI，调用后会自动显示通话界面
-          // 不再导航到自定义的 VoiceCallPage，避免两个 UI 同时存在
-          await _agoraService.startVoiceCall(widget.userId, widget.displayName);
-          logger.debug('📞 语音通话已发起（使用 TUICallKit 内置 UI）');
+        // 一对一语音通话 - 导航到 Agora 通话页（页面内部发起呼叫）
+        if (_agoraService != null && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => VoiceCallPage(
+                targetUserId: widget.userId,
+                targetDisplayName: widget.displayName,
+                isIncoming: false,
+                callType: CallType.voice,
+                currentUserId: _currentUserId,
+              ),
+            ),
+          );
+          logger.debug('📞 语音通话页面已打开（Agora）');
         }
       }
     } catch (e) {
@@ -4763,12 +4769,20 @@ class _MobileChatPageState extends State<MobileChatPage>
           }
         }
 
-        // 一对一视频通话
-        if (_agoraService != null) {
-          // 🔴 使用 TUICallKit 内置 UI，调用后会自动显示通话界面
-          // 不再导航到自定义的 VoiceCallPage，避免两个 UI 同时存在
-          await _agoraService.startVideoCall(widget.userId, widget.displayName);
-          logger.debug('📞 视频通话已发起（使用 TUICallKit 内置 UI）');
+        // 一对一视频通话 - 导航到 Agora 通话页（页面内部发起呼叫）
+        if (_agoraService != null && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => VoiceCallPage(
+                targetUserId: widget.userId,
+                targetDisplayName: widget.displayName,
+                isIncoming: false,
+                callType: CallType.video,
+                currentUserId: _currentUserId,
+              ),
+            ),
+          );
+          logger.debug('📞 视频通话页面已打开（Agora）');
         }
       }
     } catch (e) {
@@ -5243,22 +5257,29 @@ class _MobileChatPageState extends State<MobileChatPage>
         return;
       }
 
-      // 🔴 使用 TUICallKit 内置 UI 发起群组通话（只对不忙线的用户）
-      if (callType == CallType.voice) {
-        await _agoraService!.startGroupVoiceCall(
-          availableUserIds,
-          availableDisplayNames,
-          groupId: widget.groupId,
-        );
-      } else {
-        await _agoraService!.startGroupVideoCall(
-          availableUserIds,
-          availableDisplayNames,
-          groupId: widget.groupId,
+      // 🔴 发起群组通话 - 导航到 Agora 群组通话页（页面内部发起呼叫）
+      if (mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => GroupVideoCallPage(
+              targetUserId: availableUserIds.isNotEmpty
+                  ? availableUserIds.first
+                  : widget.userId,
+              targetDisplayName: availableDisplayNames.isNotEmpty
+                  ? availableDisplayNames.first
+                  : widget.displayName,
+              isIncoming: false,
+              callType: callType,
+              groupCallUserIds: availableUserIds,
+              groupCallDisplayNames: availableDisplayNames,
+              currentUserId: _currentUserId,
+              groupId: widget.groupId,
+            ),
+          ),
         );
       }
-      
-      logger.debug('📞 群组${callType == CallType.voice ? "语音" : "视频"}通话已发起（使用 TUICallKit 内置 UI）');
+
+      logger.debug('📞 群组${callType == CallType.voice ? "语音" : "视频"}通话页面已打开（Agora）');
       logger.debug('📞 可用用户: $availableUserIds, 忙线用户: $busyUserIds');
     } catch (e) {
       logger.error('发起群组通话失败', error: e);
@@ -6084,31 +6105,8 @@ class _MobileChatPageState extends State<MobileChatPage>
       // 🔴 场景2和3：重新开始通话（挂断退出或从未进入过）
       logger.debug('📞 [加入通话] 场景2/3：重新开始通话');
       
-      // 🔴 优先使用 TUICallKit 的 join 方法加入通话（显示内置 UI）
-      // 从 TUICallKitService 单例获取全局保存的 callId
-      final tuiCallKitService = TUICallKitService();
-      final callId = tuiCallKitService.currentCallId ?? _currentGroupCallId ?? message.channelName;
-      logger.debug('📞 [加入通话] 获取到的 callId: $callId (来源: ${tuiCallKitService.currentCallId != null ? "TUICallKitService" : (_currentGroupCallId != null ? "本地缓存" : "消息")})');
-      
-      if (callId != null && callId.isNotEmpty && widget.groupId != null) {
-        logger.debug('📞 [加入通话] 使用 TUICallKit join 方法加入通话, callId=$callId');
-        final callType = message.callType == 'video' ? CallType.video : CallType.voice;
-        final success = await tuiCallKitService.joinGroupCallWithTUICallKit(
-          callId, 
-          widget.groupId!, 
-          callType,
-        );
-        if (success) {
-          logger.debug('📞 [加入通话] TUICallKit join 成功');
-          // 清除本地保存的 callId（TUICallKitService 中的 callId 会在新通话开始时更新）
-          _currentGroupCallId = null;
-          return;
-        } else {
-          logger.debug('📞 [加入通话] TUICallKit join 失败，回退到原有方式');
-        }
-      } else {
-        logger.debug('📞 [加入通话] callId 为空，直接使用原有方式');
-      }
+      // 🔴 Agora:直接通过 acceptGroupCall API 加入通话，并导航到统一通话页
+      _currentGroupCallId = null;
 
       // 调用acceptGroupCall API，加入通话
       final acceptResponse = await ApiService.acceptGroupCall(
@@ -6153,7 +6151,7 @@ class _MobileChatPageState extends State<MobileChatPage>
         }
       }
 
-      // 设置AgoraService的频道信息（TUICallKit 不需要，但保留兼容性）
+      // 设置AgoraService的频道信息
       final callType = message.callType == 'video' ? CallType.video : CallType.voice;
       agoraService.setGroupCallChannel(
         acceptResponse['channel_name'] ?? message.channelName!,

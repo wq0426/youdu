@@ -19,13 +19,16 @@ class ApiConfig {
     if (!kDebugMode) {
       return 'abc.hb.cn';
     } else {
-      // Debug 模式下根据平台选择不同的本地服务器
+      // Debug 模式下连接本地后端
       // 注意：在 macOS 上编译 iOS 应用时，Platform.isMacOS 为 false，Platform.isIOS 为 true
-      if (Platform.isMacOS || Platform.isIOS) {
+      if (Platform.isAndroid) {
+        // Android 模拟器：用 10.0.2.2 访问宿主机（不能用宿主机的局域网IP）
+        // 若是真机：改成宿主机局域网IP，例如 192.168.1.20，且手机与电脑在同一WiFi
         return '192.168.1.20';
       } else {
-        // Windows、Android 和其他平台
-        return '192.168.1.6';
+        // iOS 模拟器 / macOS：与宿主机共享网络，用 127.0.0.1
+        // 若是 iOS 真机：改成宿主机局域网IP，例如 192.168.1.20，且与电脑在同一WiFi
+        return '192.168.1.20';
       }
     }
   }

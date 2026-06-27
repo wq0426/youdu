@@ -46,10 +46,9 @@ target 'Runner' do
   use_modular_headers!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
-  
-  # TUICallKit VoIP 推送扩展（可选，用于 iOS 来电推送）
-  # pod 'TUIVoIPExtension/Professional', '3.1.0'
-  
+
+  # 音视频通话使用 Agora（agora_rtc_engine 插件自动通过 CocoaPods 引入 AgoraRtcEngine）
+
   target 'RunnerTests' do
     inherit! :search_paths
   end

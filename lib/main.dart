@@ -4,11 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:window_manager/window_manager.dart';
-// 🔴 TUICallKit 仅在移动端使用，延迟导入避免桌面端启动时初始化 SDK
-import 'package:tencent_calls_uikit/tencent_calls_uikit.dart'
-    if (dart.library.io) 'package:tencent_calls_uikit/tencent_calls_uikit.dart';
-import 'package:tencent_calls_uikit/src/ui/call_navigator_observer.dart'
-    if (dart.library.io) 'package:tencent_calls_uikit/src/ui/call_navigator_observer.dart';
 import 'pages/login_page.dart';
 import 'pages/home_page.dart';
 import 'utils/app_localizations.dart';
@@ -306,14 +301,8 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
-    // 🔴 只在移动端添加 TUICallKit 导航观察者，避免桌面端启动时初始化 SDK
+    // Agora 无内置通话 UI，无需导航观察者
     final observers = <NavigatorObserver>[];
-    if (Platform.isAndroid || Platform.isIOS) {
-      final observer = TUICallKit.navigatorObserver;
-      observers.add(observer);
-      logger.debug('📞 [main.dart] 已添加 TUICallKit navigatorObserver: ${observer.hashCode}');
-      logger.debug('📞 [main.dart] getInstance() hashCode: ${TUICallKitNavigatorObserver.getInstance().hashCode}');
-    }
 
     return MaterialApp(
       title: '有度',
@@ -332,7 +321,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
         GlobalCupertinoLocalizations.delegate,
       ],
       supportedLocales: AppLocalizations.supportedLocales,
-      // 添加 TUICallKit 导航观察者（仅移动端，用于通话界面导航）
+      // 添加导航观察者（仅移动端，用于通话界面导航）
       navigatorObservers: observers,
       // 使用 onGenerateRoute 来动态决定初始路由
       onGenerateRoute: (settings) {

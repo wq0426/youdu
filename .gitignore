@@ -107,3 +107,7 @@ youdu-server-windows-amd64.exe
 youdu-server-darwin-arm64
 youdu-server-linux-arm64
 youdu-server-windows-arm64.exe
+
+docs/*
+pubspec.lock
+ios/Podfile.lock

@@ -2660,6 +2660,24 @@ class ApiService {
     return await post('/api/call/initiate_group', requestBody, token: token);
   }
 
+  /// 接听一对一通话
+  ///
+  /// 参数:
+  /// - token: 用户token
+  /// - channelName: 频道名称
+  ///
+  /// 返回:
+  /// - token: Agora Token
+  /// - uid: 用户 UID
+  static Future<Map<String, dynamic>> acceptCall({
+    required String token,
+    required String channelName,
+  }) async {
+    return await post('/api/call/accept', {
+      'channel_name': channelName,
+    }, token: token);
+  }
+
   /// 接听群组通话
   ///
   /// 参数:
@@ -2833,7 +2851,7 @@ class ApiService {
 
   /// 发送群组通话发起消息
   /// 
-  /// 当使用 TUICallKit 内置 UI 发起群组通话时，调用此接口发送"XX发起了群组语音通话"消息和"加入通话"按钮
+  /// 发起群组通话时，调用此接口发送"XX发起了群组语音通话"消息和"加入通话"按钮
   ///
   /// 参数:
   /// - token: 用户token

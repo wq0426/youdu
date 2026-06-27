@@ -61,7 +61,7 @@ import 'desktop_group_call_page.dart';  // PC端群组通话页面
 
 // WebRTC 功能模块 - 通过实现选择器自动切换真实实现或存根实现
 
-// 使用 AgoraService 兼容层（内部使用 TUICallKit）
+// 使用 AgoraService 通话服务
 import '../services/agora_service.dart';
 import '../services/native_call_service.dart';
 import '../utils/logger.dart';
@@ -2991,7 +2991,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         return m['display_name'] as String? ?? m['username'] as String? ?? 'Unknown';
       }).toList();
 
-      // 设置 AgoraService 的频道信息（TUICallKit 不需要，但保留兼容性）
+      // 设置 AgoraService 的频道信息
       _agoraService!.setGroupCallChannel(
         callData['channel_name'],
         callData['token'],
@@ -8319,7 +8319,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
       }
 
-      // 🔴 新增：设置AgoraService的频道信息（TUICallKit 不需要，但保留兼容性）
+      // 🔴 新增：设置AgoraService的频道信息
       // 使用acceptGroupCall API返回的频道信息和Token
       if (_agoraService?.currentChannelName == null) {
         _agoraService?.setGroupCallChannel(
