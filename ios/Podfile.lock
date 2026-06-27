@@ -47,10 +47,6 @@ PODS:
     - Flutter
   - flutter_secure_storage (6.0.0):
     - Flutter
-  - flutter_sound (9.30.0):
-    - Flutter
-    - flutter_sound_core (= 9.30.0)
-  - flutter_sound_core (9.30.0)
   - FMDB/Core (2.7.12)
   - FMDB/SQLCipher (2.7.12):
     - FMDB/Core
@@ -207,7 +203,6 @@ DEPENDENCIES:
   - flutter_background_service_ios (from `.symlinks/plugins/flutter_background_service_ios/ios`)
   - flutter_local_notifications (from `.symlinks/plugins/flutter_local_notifications/ios`)
   - flutter_secure_storage (from `.symlinks/plugins/flutter_secure_storage/ios`)
-  - flutter_sound (from `.symlinks/plugins/flutter_sound/ios`)
   - gal (from `.symlinks/plugins/gal/darwin`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - just_audio (from `.symlinks/plugins/just_audio/darwin`)
@@ -236,7 +231,6 @@ SPEC REPOS:
   trunk:
     - DKImagePickerController
     - DKPhotoGallery
-    - flutter_sound_core
     - FMDB
     - GoogleDataTransport
     - GoogleMLKit
@@ -278,8 +272,6 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/flutter_local_notifications/ios"
   flutter_secure_storage:
     :path: ".symlinks/plugins/flutter_secure_storage/ios"
-  flutter_sound:
-    :path: ".symlinks/plugins/flutter_sound/ios"
   gal:
     :path: ".symlinks/plugins/gal/darwin"
   image_picker_ios:
@@ -338,8 +330,6 @@ SPEC CHECKSUMS:
   flutter_background_service_ios: 00d31bdff7b4bfe06d32375df358abe0329cf87e
   flutter_local_notifications: ad39620c743ea4c15127860f4b5641649a988100
   flutter_secure_storage: 1ed9476fba7e7a782b22888f956cce43e2c62f13
-  flutter_sound: d95194f6476c9ad211d22b3a414d852c12c7ca44
-  flutter_sound_core: 7f2626d249d3a57bfa6da892ef7e22d234482c1a
   FMDB: 728731dd336af3936ce00f91d9d8495f5718a0e6
   gal: baecd024ebfd13c441269ca7404792a7152fde89
   GoogleDataTransport: 6c09b596d841063d76d4288cc2d2f42cc36e1e2a
