@@ -112,3 +112,5 @@ docs/*
 pubspec.lock
 ios/Podfile.lock
 dist/
+
+admin.tar.gz
