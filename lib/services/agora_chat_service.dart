@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:agora_chat_sdk/agora_chat_sdk.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../config/agora_config.dart';
 import '../models/message_model.dart';
 import '../utils/logger.dart';
 import 'api_service.dart';
+import 'desktop_agora_chat_bridge.dart';
 
 /// 声网 Agora Chat（即时通讯）服务
 ///
@@ -90,6 +93,25 @@ class AgoraChatService {
   bool get isLoggedIn => _loggedIn;
   String? get currentUsername => _currentUsername;
 
+  // ==================== 桌面端桥接(macOS/Windows/Linux) ====================
+  // agora_chat_sdk 只有 Android/iOS 原生实现;桌面端经 DesktopAgoraChatBridge
+  // (HeadlessInAppWebView + Agora Chat Web SDK)承载同等能力。
+  // 对外 API 与事件流完全一致,页面层无感知。
+
+  /// 是否走 Web SDK 桥接(桌面端)
+  static bool get _useWebBridge =>
+      !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
+
+  final DesktopAgoraChatBridge _bridge = DesktopAgoraChatBridge();
+  bool _bridgeWired = false;
+
+  /// 桌面端:msgId 到 (接收方, chatType) 元数据,撤回时需要(Web SDK recall 要 to+chatType)
+  final Map<String, (String, String)> _desktopMsgMeta = {};
+
+  /// 桌面端:会话最后一条消息缓存(latestMessageFor 数据源)。
+  /// key: 单聊 'u:<对端用户ID>';群聊 'g:<Agora群ID>'
+  final Map<String, MessageModel> _desktopLastMsg = {};
+
   /// 初始化 SDK（幂等）。优先使用传入的 appKey，其次用 AgoraConfig.chatAppKey。
   Future<bool> init({String? appKey}) async {
     final key =
@@ -99,6 +121,23 @@ class AgoraChatService {
       return false;
     }
     if (_initialized && _appKey == key) return true;
+
+    // 桌面端:启动后台 WebView 桥接并初始化 Web SDK 连接
+    if (_useWebBridge) {
+      _appKey = key;
+      final started = await _bridge.ensureStarted();
+      if (!started) {
+        logger.error('💬 [AgoraChat] 桌面桥接 WebView 启动失败');
+        return false;
+      }
+      _wireBridge();
+      final ok = await _bridge.init(appKey: key);
+      if (ok) {
+        _initialized = true;
+        logger.debug('💬 [AgoraChat] 桌面桥接初始化完成 appKey=$key');
+      }
+      return ok;
+    }
 
     try {
       _appKey = key;
@@ -226,6 +265,25 @@ class AgoraChatService {
   }
 
   Future<bool> _login(String username, String token) async {
+    // 桌面端:经桥接登录 Web SDK
+    if (_useWebBridge) {
+      // 切换账号时先登出旧会话,避免以旧账号身份收发
+      if (_currentUsername != null && _currentUsername != username) {
+        logger.debug('💬 [AgoraChat/桥接] 切换账号 $_currentUsername → $username,先登出');
+        await _bridge.logout();
+        _loggedIn = false;
+      }
+      final ok = await _bridge.login(user: username, token: token);
+      if (ok) {
+        _currentUsername = username;
+        _loggedIn = true;
+        logger.debug('💬 [AgoraChat/桥接] 登录成功 username=$username');
+      } else {
+        logger.error('💬 [AgoraChat/桥接] 登录失败 username=$username');
+      }
+      return ok;
+    }
+
     try {
       final alreadyConnected = await ChatClient.getInstance.isConnected();
       if (_currentUsername == username && alreadyConnected) {
@@ -273,7 +331,11 @@ class AgoraChatService {
       if (resp['code'] == 0 && resp['data'] != null) {
         final token = (resp['data'] as Map<String, dynamic>)['token'] as String?;
         if (token != null && token.isNotEmpty) {
-          await ChatClient.getInstance.renewAgoraToken(token);
+          if (_useWebBridge) {
+            await _bridge.renewToken(token);
+          } else {
+            await ChatClient.getInstance.renewAgoraToken(token);
+          }
           logger.debug('💬 [AgoraChat] token 已续期');
         }
       }
@@ -309,6 +371,14 @@ class AgoraChatService {
     if (!_initialized) {
       logger.error('💬 [AgoraChat] 未初始化，无法发送消息');
       return null;
+    }
+    if (_useWebBridge) {
+      return _bridgeSendText(
+        to: toUserId.toString(),
+        content: content,
+        chatType: 'singleChat',
+        ext: ext,
+      );
     }
     try {
       final msg = ChatMessage.createTxtSendMessage(
@@ -363,6 +433,15 @@ class AgoraChatService {
     String cursor = '', // 分页游标，首页传空
   }) async {
     if (!_initialized) return [];
+    if (_useWebBridge) {
+      final page = await _bridgeHistoryPage(
+        targetId: peerUserId.toString(),
+        isGroup: false,
+        pageSize: pageSize,
+        cursor: cursor,
+      );
+      return page.messages;
+    }
     try {
       final result =
           await ChatClient.getInstance.chatManager.fetchHistoryMessagesByOption(
@@ -398,6 +477,8 @@ class AgoraChatService {
     int pageSize = 20,
   }) async {
     if (!_initialized) return [];
+    // 桌面端桥接无 SDK 本地库:返回空,上层自动回退服务端拉取
+    if (_useWebBridge) return [];
     try {
       final conv = await ChatClient.getInstance.chatManager.getConversation(
         peerUserId.toString(),
@@ -444,6 +525,8 @@ class AgoraChatService {
     int pageSize = 30,
   }) async {
     if (!_initialized || startMsgId.isEmpty) return [];
+    // 桌面端桥接无 SDK 本地库:返回空,上层转服务端分页
+    if (_useWebBridge) return [];
     try {
       final conv = await ChatClient.getInstance.chatManager.getConversation(
         peerUserId.toString(),
@@ -478,6 +561,14 @@ class AgoraChatService {
     String cursor = '',
   }) async {
     if (!_initialized) return const AgoraMsgPage([], '');
+    if (_useWebBridge) {
+      return _bridgeHistoryPage(
+        targetId: peerUserId.toString(),
+        isGroup: false,
+        pageSize: pageSize,
+        cursor: cursor,
+      );
+    }
     try {
       final result =
           await ChatClient.getInstance.chatManager.fetchHistoryMessagesByOption(
@@ -511,6 +602,8 @@ class AgoraChatService {
     bool preferLocal = false,
   }) async {
     if (!_initialized) return [];
+    // 桌面端不产生原生 ChatConversation 对象;会话列表走 buildConversationSummaries
+    if (_useWebBridge) return [];
     // 本地优先：进会话列表的热路径直接读 SDK 本地库，秒出且不联网。
     // 本地为空（首登/换机）才回退服务端全量拉取。
     if (preferLocal) {
@@ -592,6 +685,14 @@ class AgoraChatService {
     if (!_initialized) {
       logger.error('💬 [AgoraChat] 未初始化，无法发送群消息');
       return null;
+    }
+    if (_useWebBridge) {
+      return _bridgeSendText(
+        to: agoraGroupId,
+        content: content,
+        chatType: 'groupChat',
+        ext: ext,
+      );
     }
     try {
       final msg = ChatMessage.createTxtSendMessage(
@@ -717,6 +818,15 @@ class AgoraChatService {
     String cursor = '',
   }) async {
     if (!_initialized) return [];
+    if (_useWebBridge) {
+      final page = await _bridgeHistoryPage(
+        targetId: agoraGroupId,
+        isGroup: true,
+        pageSize: pageSize,
+        cursor: cursor,
+      );
+      return page.messages;
+    }
     try {
       final result =
           await ChatClient.getInstance.chatManager.fetchHistoryMessagesByOption(
@@ -749,6 +859,8 @@ class AgoraChatService {
     int pageSize = 20,
   }) async {
     if (!_initialized) return [];
+    // 桌面端桥接无 SDK 本地库:返回空,上层自动回退服务端拉取
+    if (_useWebBridge) return [];
     try {
       final conv = await ChatClient.getInstance.chatManager.getConversation(
         agoraGroupId,
@@ -791,6 +903,8 @@ class AgoraChatService {
     int pageSize = 30,
   }) async {
     if (!_initialized || startMsgId.isEmpty) return [];
+    // 桌面端桥接无 SDK 本地库:返回空,上层转服务端分页
+    if (_useWebBridge) return [];
     try {
       final conv = await ChatClient.getInstance.chatManager.getConversation(
         agoraGroupId,
@@ -823,6 +937,14 @@ class AgoraChatService {
     String cursor = '',
   }) async {
     if (!_initialized) return const AgoraMsgPage([], '');
+    if (_useWebBridge) {
+      return _bridgeHistoryPage(
+        targetId: agoraGroupId,
+        isGroup: true,
+        pageSize: pageSize,
+        cursor: cursor,
+      );
+    }
     try {
       final result =
           await ChatClient.getInstance.chatManager.fetchHistoryMessagesByOption(
@@ -857,6 +979,8 @@ class AgoraChatService {
     bool preferLocal = false,
   }) async {
     if (!_initialized) return [];
+    // 桌面端:直接由 Web SDK 服务端会话列表构建摘要
+    if (_useWebBridge) return _bridgeConversationSummaries();
     final convs = await fetchAllConversations(preferLocal: preferLocal);
     // 并行获取每个会话的最后一条消息 + 未读数，避免会话多时串行 await 逐个等待。
     final futures = convs.map<Future<AgoraConversationSummary?>>((c) async {
@@ -900,6 +1024,13 @@ class AgoraChatService {
     required bool isGroup,
   }) async {
     if (!_initialized) return null;
+    // 桌面端:读会话最后消息缓存(收/发消息与会话列表拉取时维护)
+    if (_useWebBridge) {
+      final key = isGroup
+          ? 'g:${agoraGroupIdFor(peerId) ?? peerId.toString()}'
+          : 'u:$peerId';
+      return _desktopLastMsg[key];
+    }
     try {
       final convId = isGroup
           ? (agoraGroupIdFor(peerId) ?? peerId.toString())
@@ -937,6 +1068,14 @@ class AgoraChatService {
     bool isGroup = false,
   }) async {
     if (!_initialized) return;
+    // 桌面端:经桥接发会话已读回执(同时清服务端未读数)
+    if (_useWebBridge) {
+      await _bridge.readAck(
+        to: conversationId,
+        chatType: isGroup ? 'groupChat' : 'singleChat',
+      );
+      return;
+    }
     try {
       final conv = await ChatClient.getInstance.chatManager.getConversation(
         conversationId,
@@ -1114,6 +1253,23 @@ class AgoraChatService {
     if (!_initialized) {
       throw Exception('聊天服务未初始化，无法撤回');
     }
+    // 桌面端:Web SDK 撤回需要 to+chatType,从本端消息元数据表查
+    if (_useWebBridge) {
+      final meta = _desktopMsgMeta[agoraMsgId];
+      if (meta == null) {
+        throw Exception('撤回失败: 本端无该消息记录(可能是重启后发送的旧消息)');
+      }
+      final err = await _bridge.recall(
+        mid: agoraMsgId,
+        to: meta.$1,
+        chatType: meta.$2,
+      );
+      if (err != null) {
+        throw Exception('撤回失败: $err');
+      }
+      logger.debug('💬 [AgoraChat/桥接] 已撤回消息 msgId=$agoraMsgId');
+      return true;
+    }
     try {
       await ChatClient.getInstance.chatManager.recallMessage(agoraMsgId);
       logger.debug('💬 [AgoraChat] 已撤回消息 msgId=$agoraMsgId');
@@ -1129,6 +1285,15 @@ class AgoraChatService {
   /// [conversationId] 单聊=对端用户ID字符串；群聊=Agora 群ID。
   Future<void> sendConversationReadAck(String conversationId) async {
     if (!_initialized) return;
+    // 桌面端:经桥接发 channel ack;群会话按已登记映射判定
+    if (_useWebBridge) {
+      final isGroup = _agoraToLocalGroup.containsKey(conversationId);
+      await _bridge.readAck(
+        to: conversationId,
+        chatType: isGroup ? 'groupChat' : 'singleChat',
+      );
+      return;
+    }
     try {
       await ChatClient.getInstance.chatManager
           .sendConversationReadAck(conversationId);
@@ -1140,6 +1305,8 @@ class AgoraChatService {
   /// 单条消息已读回执（单聊）。
   Future<void> sendMessageReadAck(ChatMessage message) async {
     if (!_initialized) return;
+    // 桌面端:单条回执省略(会话级 readAck 已覆盖已读同步)
+    if (_useWebBridge) return;
     try {
       await ChatClient.getInstance.chatManager.sendMessageReadAck(message);
     } on ChatError catch (e) {
@@ -1154,6 +1321,15 @@ class AgoraChatService {
     final isGroup = agoraGroupId != null;
     final target = isGroup ? agoraGroupId : toUserId?.toString();
     if (target == null || target.isEmpty) return;
+    if (_useWebBridge) {
+      await _bridge.sendCmd(
+        to: target,
+        chatType: isGroup ? 'groupChat' : 'singleChat',
+        action: typingAction,
+        deliverOnlineOnly: true,
+      );
+      return;
+    }
     try {
       final msg = ChatMessage.createCmdSendMessage(
         targetId: target,
@@ -1184,6 +1360,22 @@ class AgoraChatService {
       return false;
     }
     if (toUserId.isEmpty) return false;
+    if (_useWebBridge) {
+      final ok = await _bridge.sendCmd(
+        to: toUserId,
+        chatType: 'singleChat',
+        action: callSignalAction,
+        ext: <String, dynamic>{
+          extCallSignal: signal,
+          if (extra != null) ...extra,
+        },
+        deliverOnlineOnly: false, // 来电需能投递到离线端
+      );
+      if (ok) {
+        logger.debug('💬 [AgoraChat/桥接] 已发送通话信令 $signal -> $toUserId');
+      }
+      return ok;
+    }
     try {
       final msg = ChatMessage.createCmdSendMessage(
         targetId: toUserId,
@@ -1232,6 +1424,10 @@ class AgoraChatService {
   /// 发布自己的在线状态（description 自定义，如 'online'/'busy'）。
   Future<void> publishPresence(String description) async {
     if (!_initialized) return;
+    if (_useWebBridge) {
+      await _bridge.publishPresence(description);
+      return;
+    }
     try {
       await ChatClient.getInstance.presenceManager.publishPresence(description);
     } on ChatError catch (e) {
@@ -1245,6 +1441,8 @@ class AgoraChatService {
     int expiry = 86400,
   }) async {
     if (!_initialized || userIds.isEmpty) return [];
+    // 桌面端:在线状态订阅暂未桥接(UI 未接线),返回空
+    if (_useWebBridge) return [];
     try {
       return await ChatClient.getInstance.presenceManager.subscribe(
         members: userIds.map((e) => e.toString()).toList(),
@@ -1259,6 +1457,7 @@ class AgoraChatService {
   /// 取消订阅一批用户的在线状态。
   Future<void> unsubscribePresence(List<int> userIds) async {
     if (!_initialized || userIds.isEmpty) return;
+    if (_useWebBridge) return;
     try {
       await ChatClient.getInstance.presenceManager
           .unsubscribe(members: userIds.map((e) => e.toString()).toList());
@@ -1268,6 +1467,8 @@ class AgoraChatService {
   /// 主动查询一批用户的当前在线状态快照。
   Future<List<ChatPresence>> fetchPresence(List<int> userIds) async {
     if (!_initialized || userIds.isEmpty) return [];
+    // 桌面端:在线状态查询暂未桥接,返回空
+    if (_useWebBridge) return [];
     try {
       return await ChatClient.getInstance.presenceManager.fetchPresenceStatus(
         members: userIds.map((e) => e.toString()).toList(),
@@ -1278,14 +1479,255 @@ class AgoraChatService {
     }
   }
 
+  // ==================== 桌面端桥接私有实现 ====================
+
+  /// 把桥接层的事件接进与原生 SDK 相同的各条流(只接一次)。
+  void _wireBridge() {
+    if (_bridgeWired) return;
+    _bridgeWired = true;
+    _bridge.onConnectionChanged = (connected) {
+      if (connected) _loggedIn = true;
+      _connectionController.add(connected);
+      logger.debug('💬 [AgoraChat/桥接] ${connected ? "onConnected" : "onDisconnected"}');
+    };
+    _bridge.onTokenWillExpire = () {
+      logger.debug('💬 [AgoraChat/桥接] token 即将过期，尝试续期');
+      _renewToken();
+    };
+    _bridge.onTokenExpired = () {
+      logger.debug('💬 [AgoraChat/桥接] token 已过期，尝试续期');
+      _renewToken();
+    };
+    _bridge.onMessage = (map) {
+      try {
+        final msg = _chatMessageFromBridgeMap(map);
+        _rememberDesktopMessage(msg);
+        logger.debug('💬 [AgoraChat/桥接] 收到 1 条消息 from=${msg.from}');
+        _messageController.add([msg]);
+        // 与移动端一致:接收方异步上报服务器归档(后台聊天记录)
+        unawaited(_syncMessagesToServer([msg]));
+      } catch (e) {
+        logger.error('💬 [AgoraChat/桥接] 消息适配失败: $e');
+      }
+    };
+    _bridge.onCmd = (map) {
+      try {
+        final msg = _chatMessageFromBridgeMap(map);
+        _cmdController.add([msg]);
+        _extractCallSignals([msg]);
+      } catch (e) {
+        logger.error('💬 [AgoraChat/桥接] 命令消息适配失败: $e');
+      }
+    };
+    _bridge.onRecall = (map) {
+      try {
+        final msg = _chatMessageFromBridgeMap(map);
+        logger.debug('💬 [AgoraChat/桥接] 1 条消息被撤回 msgId=${msg.msgId}');
+        _recallController.add([msg]);
+        unawaited(_syncRecallToServer([msg]));
+      } catch (e) {
+        logger.error('💬 [AgoraChat/桥接] 撤回消息适配失败: $e');
+      }
+    };
+    _bridge.onRead = (map) {
+      try {
+        _readController.add([_chatMessageFromBridgeMap(map)]);
+      } catch (_) {}
+    };
+    _bridge.onConvRead = (from) {
+      if (from.isNotEmpty) {
+        logger.debug('💬 [AgoraChat/桥接] 收到会话已读回执 from=$from');
+        _conversationReadController.add(from);
+      }
+    };
+  }
+
+  /// 把桥接层的 normMsg map 合成为 SDK 的 ChatMessage(纯 Dart,走 fromJson)。
+  /// 之后所有既有消费方(chatMessageToModel/页面监听)零改动复用。
+  ChatMessage _chatMessageFromBridgeMap(Map<String, dynamic> m) {
+    final isGroup = m['chatType'] == 'groupChat';
+    final isCmd = m['msgType'] == 'cmd';
+    final from = m['from']?.toString() ?? '';
+    final to = m['to']?.toString() ?? '';
+    final isSend =
+        _currentUsername != null && from.isNotEmpty && from == _currentUsername;
+    final time = (m['time'] is num) ? (m['time'] as num).toInt() : 0;
+    final ext = (m['ext'] is Map)
+        ? Map<String, dynamic>.from(m['ext'] as Map)
+        : <String, dynamic>{};
+    return ChatMessage.fromJson({
+      'from': from,
+      'to': to,
+      'body': isCmd
+          ? {'type': 'cmd', 'action': m['action']?.toString() ?? ''}
+          : {'type': 'txt', 'content': m['msg']?.toString() ?? ''},
+      'attributes': ext,
+      'direction': isSend ? 'send' : 'rec',
+      'msgId': m['id']?.toString() ?? '',
+      // 单聊会话ID=对端;群聊=Agora群ID(to)
+      'conversationId': isGroup ? to : (isSend ? to : from),
+      'chatType': isGroup ? 1 : 0,
+      'serverTime': time,
+      'localTime': time,
+      'status': 2, // SUCCESS
+    });
+  }
+
+  /// 桌面端:登记消息元数据(撤回用)+ 更新会话最后消息缓存(latestMessageFor 用)。
+  void _rememberDesktopMessage(ChatMessage msg) {
+    try {
+      final isGroup = msg.chatType == ChatType.GroupChat;
+      // 自己发出的消息才可能被本端撤回
+      if (msg.direction == MessageDirection.SEND && msg.msgId.isNotEmpty) {
+        _desktopMsgMeta[msg.msgId] =
+            (msg.to ?? '', isGroup ? 'groupChat' : 'singleChat');
+      }
+      final model = chatMessageToModel(msg);
+      final key = isGroup
+          ? 'g:${msg.conversationId ?? msg.to ?? ''}'
+          : 'u:${msg.direction == MessageDirection.SEND ? model.receiverId : model.senderId}';
+      final prev = _desktopLastMsg[key];
+      // 只允许更新为更新的消息(历史拉取的旧消息不回退缓存)
+      if (prev == null ||
+          model.createdAt.millisecondsSinceEpoch >=
+              prev.createdAt.millisecondsSinceEpoch) {
+        _desktopLastMsg[key] = model;
+      }
+    } catch (_) {}
+  }
+
+  /// 桌面端发送(文本/富媒体URL,单聊/群聊统一)。成功返回合成的 ChatMessage。
+  Future<ChatMessage?> _bridgeSendText({
+    required String to,
+    required String content,
+    required String chatType,
+    Map<String, dynamic>? ext,
+  }) async {
+    final msgId = await _bridge.sendText(
+      to: to,
+      content: content,
+      chatType: chatType,
+      ext: ext,
+    );
+    if (msgId == null) return null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final msg = _chatMessageFromBridgeMap({
+      'id': msgId,
+      'from': _currentUsername ?? '',
+      'to': to,
+      'chatType': chatType,
+      'msg': content,
+      'ext': ext ?? {},
+      'time': now,
+      'msgType': 'txt',
+    });
+    _rememberDesktopMessage(msg);
+    logger.debug('💬 [AgoraChat/桥接] 已发送消息 msgId=$msgId -> $to ($chatType)');
+    return msg;
+  }
+
+  /// 桌面端服务端分页拉历史(单聊/群聊统一)。返回该页消息(旧→新)+ 下一页游标。
+  Future<AgoraMsgPage> _bridgeHistoryPage({
+    required String targetId,
+    required bool isGroup,
+    int pageSize = 30,
+    String cursor = '',
+  }) async {
+    final res = await _bridge.getHistory(
+      targetId: targetId,
+      chatType: isGroup ? 'groupChat' : 'singleChat',
+      pageSize: pageSize,
+      cursor: cursor,
+    );
+    if (res == null) return const AgoraMsgPage([], '');
+    final raw = (res['messages'] is List) ? res['messages'] as List : const [];
+    final list = <ChatMessage>[];
+    for (final it in raw) {
+      if (it is! Map) continue;
+      try {
+        final msg = _chatMessageFromBridgeMap(Map<String, dynamic>.from(it));
+        list.add(msg);
+        // 历史里自己发的消息也登记撤回元数据(不动 lastMsg 缓存,避免旧消息回退)
+        if (msg.direction == MessageDirection.SEND && msg.msgId.isNotEmpty) {
+          _desktopMsgMeta[msg.msgId] =
+              (msg.to ?? '', isGroup ? 'groupChat' : 'singleChat');
+        }
+      } catch (_) {}
+    }
+    list.sort((a, b) {
+      final ta = a.serverTime != 0 ? a.serverTime : a.localTime;
+      final tb = b.serverTime != 0 ? b.serverTime : b.localTime;
+      return ta.compareTo(tb);
+    });
+    final isLast = res['isLast'] == true;
+    final nextCursor = isLast ? '' : (res['cursor']?.toString() ?? '');
+    logger.debug(
+        '💬 [AgoraChat/桥接] 拉取历史 ${list.length} 条 (target=$targetId, group=$isGroup)');
+    return AgoraMsgPage(list, nextCursor);
+  }
+
+  /// 桌面端:由 Web SDK 服务端会话列表构建"最近会话"摘要(游标取尽)。
+  Future<List<AgoraConversationSummary>> _bridgeConversationSummaries() async {
+    final out = <AgoraConversationSummary>[];
+    String cursor = '';
+    while (true) {
+      final res = await _bridge.getConversations(pageSize: 50, cursor: cursor);
+      if (res == null) break;
+      final convs =
+          (res['conversations'] is List) ? res['conversations'] as List : const [];
+      for (final c in convs) {
+        if (c is! Map) continue;
+        final id = c['id']?.toString() ?? '';
+        if (id.isEmpty) continue;
+        final isGroup = c['type'] == 'groupChat';
+        // 群会话须已登记本地群ID映射;单聊会话ID即对端用户ID
+        final peerId =
+            isGroup ? (localGroupIdFor(id) ?? 0) : (int.tryParse(id) ?? 0);
+        if (peerId == 0) continue;
+        MessageModel? lastModel;
+        int sortTime = 0;
+        final lm = c['lastMessage'];
+        if (lm is Map) {
+          try {
+            final cm = _chatMessageFromBridgeMap(Map<String, dynamic>.from(lm));
+            lastModel = chatMessageToModel(cm);
+            sortTime = cm.serverTime != 0 ? cm.serverTime : cm.localTime;
+            // 顺手喂 lastMsg 缓存(latestMessageFor 用)
+            _rememberDesktopMessage(cm);
+          } catch (_) {}
+        }
+        out.add(AgoraConversationSummary(
+          isGroup: isGroup,
+          peerId: peerId,
+          agoraId: id,
+          lastMessage: lastModel,
+          unreadCount: (c['unread'] is num) ? (c['unread'] as num).toInt() : 0,
+          sortTime: sortTime,
+        ));
+      }
+      final next = res['cursor']?.toString() ?? '';
+      if (next.isEmpty || next == cursor || convs.isEmpty) break;
+      cursor = next;
+    }
+    out.sort((a, b) => b.sortTime.compareTo(a.sortTime));
+    logger.debug('💬 [AgoraChat/桥接] 会话摘要 ${out.length} 个');
+    return out;
+  }
+
   /// 登出（清理登录态，保留 SDK 初始化）
   Future<void> logout() async {
     try {
       if (_initialized) {
-        // 超时保护：避免原生 logout 迟迟不回调导致 await 永久挂起
-        await ChatClient.getInstance
-            .logout(true)
-            .timeout(const Duration(seconds: 8));
+        if (_useWebBridge) {
+          await _bridge.logout();
+          _desktopMsgMeta.clear();
+          _desktopLastMsg.clear();
+        } else {
+          // 超时保护：避免原生 logout 迟迟不回调导致 await 永久挂起
+          await ChatClient.getInstance
+              .logout(true)
+              .timeout(const Duration(seconds: 8));
+        }
       }
     } catch (e) {
       logger.debug('💬 [AgoraChat] 登出忽略异常: $e');

@@ -79,6 +79,7 @@ import '../widgets/emoji_picker.dart';
 // import '../widgets/message_bubble.dart'; // TODO: Create message_bubble widget
 import '../widgets/voice_message_player.dart';
 import '../widgets/voice_message_bubble.dart';
+import '../widgets/bubble_tail_painter.dart';
 import '../widgets/scheduled_message_dialog.dart';
 import '../widgets/voice_record_panel.dart';
 import '../widgets/video_player_page.dart';
@@ -5893,7 +5894,8 @@ class _MobileChatPageState extends State<MobileChatPage>
               : MainAxisAlignment.start,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!isMe) _buildAvatar(message),
+            // 头像仅群聊展示；单聊（一对一）不展示双方头像，气泡贴边，与 Telegram 私聊一致
+            if (widget.isGroup && !isMe) _buildAvatar(message),
             const SizedBox(width: 8),
             Flexible(
               child: Column(
@@ -5901,8 +5903,8 @@ class _MobileChatPageState extends State<MobileChatPage>
                     ? CrossAxisAlignment.end
                     : CrossAxisAlignment.start,
                 children: [
-                  // 发送者名称（群聊中显示）
-                  if (!isMe)
+                  // 发送者名称（仅群聊中显示，单聊不展示）
+                  if (!isMe && widget.isGroup)
                     Padding(
                       padding: const EdgeInsets.only(
                         bottom: 4,
@@ -5917,7 +5919,7 @@ class _MobileChatPageState extends State<MobileChatPage>
               ),
             ),
             const SizedBox(width: 8),
-            if (isMe) _buildAvatar(message),
+            if (widget.isGroup && isMe) _buildAvatar(message),
             // 多选模式复选框
             if (_isMultiSelectMode)
               Checkbox(
@@ -6690,6 +6692,118 @@ class _MobileChatPageState extends State<MobileChatPage>
   }
 
   // 构建头像
+  // 打开消息搜索页（与原「搜索」按钮效果一致）
+  void _openMessageSearch() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => MessageSearchPage(
+          messages: _messages,
+          chatName: widget.displayName,
+        ),
+      ),
+    );
+  }
+
+  // 一对一聊天 AppBar 右上角的对方头像入口：
+  // 点击弹出三项菜单 —— 基本信息 / 搜索记录 / 更多操作。
+  Widget _buildPeerAvatarAction() {
+    final avatarUrl = _avatarCache[widget.userId] ?? widget.avatar;
+    final name = _displayName;
+    final initials = name.isEmpty
+        ? ''
+        : (name.length >= 2 ? name.substring(name.length - 2) : name);
+
+    final avatar = Container(
+      width: 34,
+      height: 34,
+      decoration: const BoxDecoration(
+        color: Color(0xFF4A90E2),
+        shape: BoxShape.circle,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: avatarUrl != null && avatarUrl.isNotEmpty
+          ? Image.network(
+              avatarUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Center(
+                child: Text(
+                  initials,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            )
+          : Center(
+              child: Text(
+                initials,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+    );
+
+    return PopupMenuButton<String>(
+      tooltip: '对方信息',
+      offset: const Offset(0, 48),
+      onSelected: (value) {
+        switch (value) {
+          case 'info':
+            _showOtherUserInfo(widget.userId); // 基本信息
+            break;
+          case 'search':
+            _openMessageSearch(); // 搜索记录
+            break;
+          case 'more':
+            _showMoreMenu(); // 更多操作
+            break;
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem<String>(
+          value: 'info',
+          child: Row(
+            children: [
+              Icon(Icons.person_outline, size: 20),
+              SizedBox(width: 12),
+              Text('基本信息'),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'search',
+          child: Row(
+            children: [
+              Icon(Icons.search, size: 20),
+              SizedBox(width: 12),
+              Text('搜索记录'),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'more',
+          child: Row(
+            children: [
+              Icon(Icons.more_horiz, size: 20),
+              SizedBox(width: 12),
+              Text('更多操作'),
+            ],
+          ),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: avatar,
+      ),
+    );
+  }
+
   Widget _buildAvatar(MessageModel message) {
     final isMe = message.senderId == _currentUserId;
     
@@ -7105,35 +7219,51 @@ class _MobileChatPageState extends State<MobileChatPage>
   // 构建文本消息
   Widget _buildTextMessage(MessageModel message, bool isMe) {
     final c = AppColors.of(context);
+    final bubbleColor = isMe ? c.sentBubble : c.receivedBubble;
     // 🔴 Telegram 风格：时间显示在气泡内右下角，文字末尾用隐形占位预留空间
     final timeWidget = _buildBubbleTime(message, isMe);
-    return Container(
-      constraints: BoxConstraints(
-        maxWidth: MediaQuery.of(context).size.width * 0.72,
-      ),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-      decoration: BoxDecoration(
-        color: isMe ? c.sentBubble : c.receivedBubble,
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(18),
-          topRight: const Radius.circular(18),
-          bottomLeft: Radius.circular(isMe ? 18 : 4),
-          bottomRight: Radius.circular(isMe ? 4 : 18),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 3,
-            offset: const Offset(0, 1),
+    // 🔴 Telegram 风格小尾巴：画在气泡底角外侧，向内多重叠几像素避免接缝
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned(
+          bottom: 0,
+          right: isMe ? -5 : null,
+          left: isMe ? null : -5,
+          child: CustomPaint(
+            size: const Size(11, 15),
+            painter: BubbleTailPainter(color: bubbleColor, isMe: isMe),
           ),
-        ],
-      ),
-      child: Stack(
-        children: [
-          _buildMessageWithEmotions(message.content, isMe, timeReserve: timeWidget),
-          Positioned(right: 0, bottom: 0, child: timeWidget),
-        ],
-      ),
+        ),
+        Container(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.72,
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+          decoration: BoxDecoration(
+            color: bubbleColor,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(18),
+              topRight: const Radius.circular(18),
+              bottomLeft: Radius.circular(isMe ? 18 : 0),
+              bottomRight: Radius.circular(isMe ? 0 : 18),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 3,
+                offset: const Offset(0, 1),
+              ),
+            ],
+          ),
+          child: Stack(
+            children: [
+              _buildMessageWithEmotions(message.content, isMe, timeReserve: timeWidget),
+              Positioned(right: 0, bottom: 0, child: timeWidget),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -7948,25 +8078,27 @@ class _MobileChatPageState extends State<MobileChatPage>
       timeColor = isDark ? Colors.white.withOpacity(0.45) : const Color(0xFFA0A6AC);
     }
 
-    // 发送状态图标（仅自己发送的消息显示）
+    // 发送状态图标（仅自己发送的消息显示）：
+    // 只有两种状态 —— 未读=单钩(灰色)，已读=双钩(绿色/深色主题下半透明白)。
+    // 发送失败仍保留红色感叹号，否则失败消息会和"未读单钩"无法区分。
     Widget? statusIcon;
     if (isMe) {
       final isFailed = message.status == 'failed' || message.status == 'forbidden';
-      final isSending = message.status == 'sending';
-      final checkColor = onMedia
-          ? Colors.white
-          : (isDark ? Colors.white.withOpacity(0.9) : const Color(0xFF4FAE4E));
+      final isRead = !widget.isGroup && message.isRead && message.readAt != null;
       if (isFailed) {
-        // 被拉黑/删除/移除 或 发送失败：红色感叹号
         statusIcon = const Icon(Icons.error, size: 14, color: Color(0xFFFF6B6B));
-      } else if (isSending) {
-        statusIcon = Icon(Icons.access_time, size: 12, color: timeColor);
-      } else if (!widget.isGroup && message.isRead && message.readAt != null) {
-        // 私聊已读：双勾
-        statusIcon = Icon(Icons.done_all, size: 15, color: checkColor);
+      } else if (isRead) {
+        // 已读：双钩（保持原绿色）
+        final readColor = onMedia
+            ? Colors.white
+            : (isDark ? Colors.white.withOpacity(0.9) : const Color(0xFF4FAE4E));
+        statusIcon = Icon(Icons.done_all, size: 15, color: readColor);
       } else {
-        // 已发送未读（或群聊）：单勾
-        statusIcon = Icon(Icons.done, size: 15, color: checkColor);
+        // 未读（含发送中/群聊）：单钩（灰色）
+        final unreadColor = onMedia
+            ? Colors.white.withOpacity(0.7)
+            : (isDark ? Colors.white.withOpacity(0.45) : const Color(0xFFA0A6AC));
+        statusIcon = Icon(Icons.done, size: 15, color: unreadColor);
       }
     }
 
@@ -9825,30 +9957,33 @@ class _MobileChatPageState extends State<MobileChatPage>
         ),
         actions: [
           if (!_isMultiSelectMode) ...[
-            if (widget.isGroup && widget.groupId != null)
+            if (widget.isGroup) ...[
+              if (widget.groupId != null)
+                IconButton(
+                  icon: const Icon(Icons.group_outlined),
+                  onPressed: _navigateToGroupInfo,
+                  tooltip: '群组信息',
+                ),
               IconButton(
-                icon: const Icon(Icons.group_outlined),
-                onPressed: _navigateToGroupInfo,
-                tooltip: '群组信息',
+                icon: const Icon(Icons.search),
+                onPressed: _openMessageSearch,
               ),
-            IconButton(
-              icon: const Icon(Icons.search),
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => MessageSearchPage(
-                      messages: _messages,
-                      chatName: widget.displayName,
-                    ),
-                  ),
-                );
-              },
-            ),
-            IconButton(
-              icon: const Icon(Icons.more_vert),
-              onPressed: _showMoreMenu,
-            ),
+              IconButton(
+                icon: const Icon(Icons.more_vert),
+                onPressed: _showMoreMenu,
+              ),
+            ] else if (widget.isFileAssistant) ...[
+              IconButton(
+                icon: const Icon(Icons.search),
+                onPressed: _openMessageSearch,
+              ),
+              IconButton(
+                icon: const Icon(Icons.more_vert),
+                onPressed: _showMoreMenu,
+              ),
+            ] else
+              // 一对一：右上角只放对方头像，点击弹出 基本信息 / 搜索记录 / 更多操作
+              _buildPeerAvatarAction(),
           ] else ...[
             TextButton(
               onPressed: () {

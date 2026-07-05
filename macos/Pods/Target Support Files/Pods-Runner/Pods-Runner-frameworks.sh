@@ -177,12 +177,14 @@ code_sign_if_enabled() {
 
 if [[ "$CONFIGURATION" == "Debug" ]]; then
   install_framework "${BUILT_PRODUCTS_DIR}/FMDB/FMDB.framework"
+  install_framework "${BUILT_PRODUCTS_DIR}/OrderedSet/OrderedSet.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/SQLCipher/SQLCipher.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/agora_rtc_engine/agora_rtc_engine.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/audio_session/audio_session.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/audioplayers_darwin/audioplayers_darwin.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/file_picker/file_picker.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/file_selector_macos/file_selector_macos.framework"
+  install_framework "${BUILT_PRODUCTS_DIR}/flutter_inappwebview_macos/flutter_inappwebview_macos.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/flutter_local_notifications/flutter_local_notifications.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/flutter_secure_storage_macos/flutter_secure_storage_macos.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/gal/gal.framework"
@@ -231,12 +233,14 @@ if [[ "$CONFIGURATION" == "Debug" ]]; then
 fi
 if [[ "$CONFIGURATION" == "Profile" ]]; then
   install_framework "${BUILT_PRODUCTS_DIR}/FMDB/FMDB.framework"
+  install_framework "${BUILT_PRODUCTS_DIR}/OrderedSet/OrderedSet.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/SQLCipher/SQLCipher.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/agora_rtc_engine/agora_rtc_engine.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/audio_session/audio_session.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/audioplayers_darwin/audioplayers_darwin.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/file_picker/file_picker.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/file_selector_macos/file_selector_macos.framework"
+  install_framework "${BUILT_PRODUCTS_DIR}/flutter_inappwebview_macos/flutter_inappwebview_macos.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/flutter_local_notifications/flutter_local_notifications.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/flutter_secure_storage_macos/flutter_secure_storage_macos.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/gal/gal.framework"
@@ -285,12 +289,14 @@ if [[ "$CONFIGURATION" == "Profile" ]]; then
 fi
 if [[ "$CONFIGURATION" == "Release" ]]; then
   install_framework "${BUILT_PRODUCTS_DIR}/FMDB/FMDB.framework"
+  install_framework "${BUILT_PRODUCTS_DIR}/OrderedSet/OrderedSet.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/SQLCipher/SQLCipher.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/agora_rtc_engine/agora_rtc_engine.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/audio_session/audio_session.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/audioplayers_darwin/audioplayers_darwin.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/file_picker/file_picker.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/file_selector_macos/file_selector_macos.framework"
+  install_framework "${BUILT_PRODUCTS_DIR}/flutter_inappwebview_macos/flutter_inappwebview_macos.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/flutter_local_notifications/flutter_local_notifications.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/flutter_secure_storage_macos/flutter_secure_storage_macos.framework"
   install_framework "${BUILT_PRODUCTS_DIR}/gal/gal.framework"

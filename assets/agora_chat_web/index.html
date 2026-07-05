@@ -6,8 +6,23 @@
   <title>Agora Chat Bridge</title>
 </head>
 <body>
+<script>
+  // 🔴 必须在 SDK 脚本之前注册:捕获 SDK 加载期的 JS 错误,供 Dart 侧诊断读取
+  window.__jsErrors = [];
+  window.addEventListener('error', function (e) {
+    window.__jsErrors.push(String((e && (e.message || e.error)) || e) +
+      (e && e.filename ? (' @' + e.filename + ':' + e.lineno) : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    window.__jsErrors.push('unhandledrejection: ' + String(e && e.reason));
+  });
+</script>
+<!-- __AGORA_CHAT_SDK__ -->
 <!--
   桌面端(macOS/Windows) Agora Chat 桥接页。
+  Dart 侧加载本文件后，把上面的 __AGORA_CHAT_SDK__ 占位注释替换为
+  <script>assets/agora_chat_web/agora-chat.js 全文</script>(设置 window.websdk)，
+  再作为 initialData 一次性喂给 WebView —— 避免 600KB 的 evaluateJavascript。
   由 DesktopAgoraChatBridge 通过 flutter_inappwebview 的 HeadlessInAppWebView 承载(无界面)。
 
   流程:
@@ -31,13 +46,43 @@
   var conn = null;         // websdk connection 实例
   var currentUser = null;  // 当前登录用户名(纯数字字符串)
 
+  // 🔴 SDK 句柄解析:agora-chat.js 的 UMD exports(window.websdk)上不一定有
+  // connection 构造器(webpack export 绑定差异),真正可用的对象挂在 window.WebIM。
+  // 两者都试,取带 connection 的那个。
+  function sdk() {
+    var s = window.websdk;
+    if (s && s.connection) return s;
+    var w = window.WebIM;
+    if (w && w.connection) return w;
+    return null;
+  }
+
+  // platformReady 之前 callHandler 不可用，先排队，ready 后统一冲刷
+  var _pendingCalls = [];
+  var _platformReady = false;
   function callHandler(name, obj) {
     try {
-      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      if (_platformReady && window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
         window.flutter_inappwebview.callHandler(name, JSON.stringify(obj));
+      } else {
+        _pendingCalls.push([name, obj]);
       }
     } catch (e) { /* 忽略：桥接不可用时不影响页面 */ }
   }
+  function _flushPending() {
+    _platformReady = true;
+    var p = _pendingCalls; _pendingCalls = [];
+    for (var i = 0; i < p.length; i++) callHandler(p[i][0], p[i][1]);
+  }
+  window.addEventListener('flutter_inappwebviewPlatformReady', _flushPending);
+  // 🔴 兜底:macOS 无头模式下 platformReady 事件可能不触发/在监听器注册前已触发,
+  // 轮询 callHandler 可用性,可用即冲刷队列(与事件回调幂等)。
+  var _readyPoll = setInterval(function () {
+    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      clearInterval(_readyPoll);
+      if (!_platformReady) _flushPending();
+    }
+  }, 300);
 
   function _event(type, payload) { callHandler(H_EVENT, { type: type, payload: payload || {} }); }
   function _result(callId, ok, data) { callHandler(H_RESULT, { callId: callId, ok: ok, data: data }); }
@@ -90,8 +135,8 @@
     init: function (argJson, callId) {
       try {
         var arg = JSON.parse(argJson);
-        if (!window.websdk) { _result(callId, false, 'websdk 未注入'); return; }
-        conn = new window.websdk.connection({ appKey: arg.appKey });
+        if (!sdk()) { _result(callId, false, 'websdk 未注入或缺少 connection 构造器'); return; }
+        conn = new (sdk().connection)({ appKey: arg.appKey });
         registerHandlers();
         _result(callId, true, {});
       } catch (e) { _result(callId, false, String(e)); }
@@ -132,7 +177,7 @@
     sendText: function (argJson, callId) {
       try {
         var arg = JSON.parse(argJson);
-        var msg = window.websdk.message.create({
+        var msg = sdk().message.create({
           type: 'txt', chatType: arg.chatType, to: String(arg.to),
           msg: arg.content, ext: arg.ext || {}
         });
@@ -146,7 +191,7 @@
     sendCmd: function (argJson, callId) {
       try {
         var arg = JSON.parse(argJson);
-        var msg = window.websdk.message.create({
+        var msg = sdk().message.create({
           type: 'cmd', chatType: arg.chatType, to: String(arg.to),
           action: arg.action, ext: arg.ext || {},
           deliverOnlineOnly: !!arg.deliverOnlineOnly
@@ -188,13 +233,21 @@
     readAck: function (argJson, callId) {
       try {
         var arg = JSON.parse(argJson);
-        // 用 channel ack 通知对端"该会话已全部读"
-        var msg = window.websdk.message.create({
+        // 用 channel ack 通知对端"该会话已全部读"(同时清服务端该会话未读数)
+        var msg = sdk().message.create({
           type: 'channel', chatType: arg.chatType, to: String(arg.to)
         });
         conn.send(msg).then(function () { _result(callId, true, {}); })
-          .catch(function () { _result(callId, true, {}); }); // 已读失败不算错
-      } catch (e) { _result(callId, true, {}); }
+          .catch(function (e) {
+            // 已读失败不算错(不阻塞调用方),但必须留日志,否则对端收不到已读时无从排查
+            _log('readAck send 失败 to=' + arg.to + ' chatType=' + arg.chatType +
+              ': ' + String(e && (e.message || e.data) || JSON.stringify(e)));
+            _result(callId, true, {});
+          });
+      } catch (e) {
+        _log('readAck 异常: ' + String(e));
+        _result(callId, true, {});
+      }
     },
 
     // 拉会话列表。arg = {pageSize, cursor}

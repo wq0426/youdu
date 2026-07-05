@@ -61,7 +61,12 @@ post_install do |installer|
     # 强制设置所有 Pod 的最低部署目标为 14.0
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
-      
+
+      # 🔴 iOS 18.4 模拟器运行时缺少 /usr/lib/swift/libswiftWebKit.dylib（Apple 只给真机放了兼容垫片）。
+      # 部署目标 < 15.4 时，链接器会把 WebKit Swift overlay 符号记到该 dylib（见 WebKit.tbd 的 $ld$previous 标记），
+      # flutter_inappwebview 在 18.4 模拟器上启动即崩。仅模拟器构建提到 15.4，符号直接绑定 WebKit.framework；真机维持 14.0。
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET[sdk=iphonesimulator*]'] = '15.4'
+
       # 🔴 禁用 explicit modules 解决 Xcode 16 的 libclang.dylib 问题
       config.build_settings['SWIFT_COMPILATION_MODE'] = 'wholemodule'
       config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'

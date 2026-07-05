@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:extended_text_field/extended_text_field.dart';
-import 'package:extended_text/extended_text.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
@@ -48,6 +47,7 @@ import '../models/message_model.dart';
 import '../models/group_model.dart';
 import '../models/online_notification_model.dart';
 import '../widgets/create_group_dialog.dart';
+import '../widgets/bubble_tail_painter.dart';
 import 'mobile_contacts_page.dart';
 import '../widgets/settings_dialog.dart';
 import '../widgets/mention_member_picker.dart';
@@ -114,6 +114,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   StreamSubscription<List<ChatMessage>>? _agoraRecallSubscription; // 阶段4：撤回
   StreamSubscription<List<ChatMessage>>? _agoraReadSubscription; // 阶段4：已读回执
   StreamSubscription<List<ChatMessage>>? _agoraCmdSubscription; // 阶段4：正在输入
+  StreamSubscription<String>? _agoraConvReadSubscription; // 会话已读回执（对端读完整个会话）
   // 条件初始化 Agora 服务（替代 WebRTC）
   late final AgoraService? _agoraService = FeatureConfig.enableWebRTC
       ? AgoraService()
@@ -169,7 +170,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   // 最近联系人相关状态
   List<RecentContactModel> _recentContacts = []; // 最近联系人列表
   List<RecentContactModel> _sortedRecentContacts = []; // 🔧 缓存的排序后列表，避免每次build都排序
-  bool _isLoadingRecentContacts = false; // 是否正在加载最近联系人
+  final Set<String> _pendingUnknownGroupFetches = {}; // 新群会话补登去重(按Agora群ID)
+  final Set<int> _pendingUnknownUserFetches = {}; // 新好友会话补登去重(按对端用户ID)
+  // 是否正在加载最近联系人。初始即为 true：首帧显示"加载中"而非闪现"暂无会话"空态
+  bool _isLoadingRecentContacts = true;
   String? _recentContactsError; // 最近联系人加载错误信息
   
   // 首次同步数据状态
@@ -222,6 +226,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       ScrollController(); // 消息列表滚动控制器
   final GlobalKey _messageListBottomKey = GlobalKey(); // 消息列表底部锚点Key
   String _previousInputText = ''; // 记录上一次的输入文本，用于检测删除操作
+  bool _hasInputText = false; // 输入框是否有文本（用于控制发送按钮显示）
   bool _isSendingMessage = false; // 是否正在发送消息
   bool _isSendingCallMessage =
       false; // 是否正在发送通话相关消息（call_ended、call_rejected 或 call_cancelled）
@@ -297,6 +302,16 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     _initialize();
 
     logger.debug('🚀 HomePage initState - 同步部分完成');
+
+    // 监听消息输入框变化 - 控制发送按钮的显示/隐藏
+    _messageInputController.addListener(() {
+      final hasText = _messageInputController.text.trim().isNotEmpty;
+      if (hasText != _hasInputText && mounted) {
+        setState(() {
+          _hasInputText = hasText;
+        });
+      }
+    });
 
     // 监听搜索框变化 - 实时搜索（带防抖）
     _searchController.addListener(() {
@@ -471,6 +486,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
             // 🔧 修复：将该联系人添加到已读集合中
             _markedAsReadContacts.add(firstContactKey);
+
+            // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+            _updateSortedRecentContacts();
           }
         });
 
@@ -518,6 +536,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       }
     } catch (e) {
       logger.debug('❌ HomePage 初始化失败: $e');
+      // 初始化中途失败时复位加载态，避免列表/会话区一直显示"加载中"
+      if (mounted && _isLoadingRecentContacts) {
+        setState(() => _isLoadingRecentContacts = false);
+      }
     }
   }
 
@@ -598,6 +620,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     _agoraRecallSubscription?.cancel(); // 阶段4
     _agoraReadSubscription?.cancel(); // 阶段4
     _agoraCmdSubscription?.cancel(); // 阶段4
+    _agoraConvReadSubscription?.cancel();
     _wsService.disconnect();
     // 停止响铃和震动
     _stopRingtone();
@@ -986,6 +1009,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       _agoraCmdSubscription?.cancel();
       _agoraCmdSubscription =
           AgoraChatService().cmdStream.listen(_handleAgoraCmd);
+      _agoraConvReadSubscription?.cancel();
+      _agoraConvReadSubscription = AgoraChatService()
+          .conversationReadStream
+          .listen(_handleAgoraConversationRead);
 
       // 连接成功后，发送在线状态
       try {
@@ -2470,11 +2497,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
               // 请求麦克风权限
               logger.debug('🎯 [HomePage.onConfirm] 开始请求麦克风权限...');
-              final status = await Permission.microphone.request();
+              final micGranted = await _requestMicPermission();
               logger.debug(
-                '🎯 [HomePage.onConfirm] 麦克风权限请求结果: ${status.isGranted}',
+                '🎯 [HomePage.onConfirm] 麦克风权限请求结果: $micGranted',
               );
-              if (!status.isGranted) {
+              if (!micGranted) {
                 logger.debug('🎯 [HomePage.onConfirm] ⚠️ 麦克风权限被拒绝');
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -2874,10 +2901,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
 
     // 请求麦克风和摄像头权限
-    final micStatus = await Permission.microphone.request();
-    final cameraStatus = await Permission.camera.request();
+    final mediaGranted = await _requestMicAndCameraPermission();
 
-    if (!micStatus.isGranted || !cameraStatus.isGranted) {
+    if (!mediaGranted) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -3143,6 +3169,33 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
   }
 
+  /// 请求麦克风权限（桌面端安全版）
+  /// permission_handler 没有 macOS/Linux 实现，直接调用会抛 MissingPluginException，
+  /// 导致通话流程静默中断。桌面端跳过请求，由系统在首次访问麦克风时自动弹出授权框。
+  Future<bool> _requestMicPermission() async {
+    if (!Platform.isAndroid && !Platform.isIOS) return true;
+    try {
+      final status = await Permission.microphone.request();
+      return status.isGranted;
+    } catch (e) {
+      logger.error('请求麦克风权限失败: $e');
+      return true; // 权限插件异常时不阻断通话流程
+    }
+  }
+
+  /// 请求麦克风和摄像头权限（桌面端安全版，说明同上）
+  Future<bool> _requestMicAndCameraPermission() async {
+    if (!Platform.isAndroid && !Platform.isIOS) return true;
+    try {
+      final mic = await Permission.microphone.request();
+      final cam = await Permission.camera.request();
+      return mic.isGranted && cam.isGranted;
+    } catch (e) {
+      logger.error('请求麦克风/摄像头权限失败: $e');
+      return true; // 权限插件异常时不阻断通话流程
+    }
+  }
+
   // 发起语音通话
   Future<void> _startVoiceCall(RecentContactModel contact) async {
     // 调试信息：打印联系人信息
@@ -3232,8 +3285,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
 
     // 请求麦克风权
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) {
+    final micGranted = await _requestMicPermission();
+    if (!micGranted) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -3464,10 +3517,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
 
     // 请求麦克风和摄像头权
-    final micStatus = await Permission.microphone.request();
-    final cameraStatus = await Permission.camera.request();
+    final mediaGranted = await _requestMicAndCameraPermission();
 
-    if (!micStatus.isGranted || !cameraStatus.isGranted) {
+    if (!mediaGranted) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -3612,9 +3664,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         continue;
       }
 
-      // 非当前会话：刷新最近联系人列表即可
+      // 非当前会话：原地更新会话列表（未读+1）。
+      // 🔵 不能重拉 getServerConversations——Agora 服务端会话列表是异步汇聚的（有延迟且限频），
+      // 刚收到的消息往往还查不到，导致会话列表看起来"没更新"（移动端 MobileChatListPage 同为原地更新）。
       if (!belongsToCurrentChat) {
-        _loadRecentContacts();
+        _patchRecentContactWithMessage(chatMsg, incrementUnread: true);
         continue;
       }
 
@@ -3640,13 +3694,297 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
       _messages.add(model);
       changed = true;
+      // 当前会话：同步更新左侧列表的最后消息预览（不加未读，用户正在查看）
+      _patchRecentContactWithMessage(chatMsg, incrementUnread: false);
     }
 
     if (changed) {
       setState(() {});
       _scrollToBottom();
+    }
+  }
+
+  /// 🔵 收到 Agora 消息时原地更新会话列表（最后消息预览/时间/未读/@我），
+  /// 与移动端 MobileChatListPage 的处理方式保持一致。
+  /// 列表中不存在该会话（新会话）时才回退全量刷新。
+  void _patchRecentContactWithMessage(
+    ChatMessage chatMsg, {
+    required bool incrementUnread,
+  }) {
+    try {
+      final model = AgoraChatService.chatMessageToModel(chatMsg);
+      // 通话系统消息实时展示走 WS 帧（其处理器自行维护列表），这里跳过
+      if (AgoraChatService.callSystemMessageTypes.contains(model.messageType)) {
+        return;
+      }
+
+      final isGroup = chatMsg.chatType == ChatType.GroupChat;
+      int contactId;
+      if (isGroup) {
+        final agoraGid = chatMsg.conversationId ?? chatMsg.to ?? '';
+        final mapped = AgoraChatService().localGroupIdFor(agoraGid);
+        if (mapped == null) {
+          // 🔵 未登记映射的群(典型:别人刚创建新群把我拉进去,启动期登记的映射里没有它)。
+          // 不能拿 Agora 群ID 当本地群ID——匹配不到会话;也不能回退全量刷新——
+          // _bridgeConversationSummaries 会把无映射的群直接丢弃,新群永远刷不出来。
+          _recoverUnknownGroupConversation(agoraGid, chatMsg);
+          return;
+        }
+        contactId = mapped;
+      } else {
+        contactId = int.tryParse(chatMsg.from ?? '') ?? 0;
+      }
+      if (contactId == 0) return;
+
+      final idx = _recentContacts.indexWhere(
+        (c) => isGroup
+            ? (c.isGroup && (c.groupId ?? c.userId) == contactId)
+            : (!c.isGroup && c.userId == contactId),
+      );
+      if (idx == -1) {
+        if (!isGroup) {
+          // 🔵 列表里没有的 1v1 会话(典型:好友申请刚被通过,对方/服务端发来审核系统消息)。
+          // 不能回退全量刷新——服务端会话列表异步汇聚查不到新会话,且此刻对端往往
+          // 还留在本地"待审核"集合里,getRecentContacts 会把该会话直接过滤掉。
+          unawaited(_recoverUnknownUserConversation(
+            contactId,
+            chatMsg,
+            incrementUnread: incrementUnread,
+          ));
+          return;
+        }
+        // 列表里还没有这个会话（新群）：回退全量刷新补全条目
+        _loadRecentContacts();
+        return;
+      }
+
+      if (!isGroup) {
+        // 已有会话也可能收到好友审核系统消息(如删除好友后重新加回):
+        // 同步本地待审核集合并刷新通讯录,否则该会话会被 pending 过滤再次隐藏
+        unawaited(_syncFriendFlowState(contactId, model.content));
+      }
+
+      // 群消息：检测是否@我（粘性标记，进会话后由已读逻辑清除）
+      bool mentionedMe = false;
+      if (isGroup) {
+        final ids = chatMsg.attributes?[AgoraChatService.extMentionedUserIds];
+        if (ids is List) {
+          mentionedMe =
+              ids.any((e) => int.tryParse(e.toString()) == _currentUserId);
+        }
+      }
+
+      final preview = _formatMessagePreviewForRecentContact(
+        model.messageType,
+        model.content,
+      );
+      setState(() {
+        _recentContacts[idx] = _recentContacts[idx].copyWith(
+          lastMessage: preview,
+          lastMessageTime: model.createdAt.toIso8601String(),
+          // copyWith 传 null 会保留旧值，用空串覆盖可能残留的 'recalled' 状态
+          lastMessageStatus: '',
+          lastMessageFromMe: false,
+          lastMessageRead: false,
+          unreadCount: incrementUnread
+              ? _recentContacts[idx].unreadCount + 1
+              : _recentContacts[idx].unreadCount,
+          hasMentionedMe: mentionedMe ? true : null,
+        );
+        _updateSortedRecentContacts();
+      });
+    } catch (e) {
+      logger.debug('❌ [会话列表] 原地更新失败，回退全量刷新: $e');
       _loadRecentContacts();
     }
+  }
+
+  /// 🔵 收到未登记映射的群消息(新群):从后端拉群列表补登记 本地群ID↔Agora群ID 映射,
+  /// 再把该群会话插入列表。全程不走 _loadRecentContacts 全量刷新——
+  /// getServerConversations 汇聚有延迟,刚建的群会话往往还查不到,会把新群刷没。
+  Future<void> _recoverUnknownGroupConversation(
+    String agoraGid,
+    ChatMessage chatMsg,
+  ) async {
+    if (agoraGid.isEmpty || !_pendingUnknownGroupFetches.add(agoraGid)) return;
+    try {
+      final token = _token;
+      if (token == null || token.isEmpty) return;
+      // 拉全量群列表补登记映射(顺带补齐其它缺失的群)
+      final resp = await ApiService.getUserGroups(token: token);
+      final groups = (resp['data']?['groups'] as List?) ?? const [];
+      for (final g in groups) {
+        if (g is! Map) continue;
+        final localGid =
+            g['id'] is int ? g['id'] as int : int.tryParse('${g['id']}');
+        if (localGid == null) continue;
+        AgoraChatService()
+            .registerGroupMapping(localGid, g['agora_group_id'] as String?);
+      }
+      final localGid = AgoraChatService().localGroupIdFor(agoraGid);
+      if (localGid == null || !mounted) return;
+      final idx = _recentContacts.indexWhere(
+        (c) => c.isGroup && (c.groupId ?? c.userId) == localGid,
+      );
+      if (idx != -1) {
+        // WS 系统通知先一步插入了该会话:原地补最后消息预览即可
+        _patchRecentContactWithMessage(chatMsg, incrementUnread: true);
+        return;
+      }
+      await _insertGroupContact(localGid, chatMsg);
+    } catch (e) {
+      logger.debug('❌ [会话列表] 新群会话补登失败 agoraGid=$agoraGid: $e');
+    } finally {
+      _pendingUnknownGroupFetches.remove(agoraGid);
+    }
+  }
+
+  /// 拉群详情并把新群会话插入列表顶部(带最后消息预览)。
+  Future<void> _insertGroupContact(
+    int localGroupId,
+    ChatMessage chatMsg,
+  ) async {
+    final token = _token;
+    if (token == null || token.isEmpty) return;
+    final resp = await ApiService.getGroupDetail(
+      token: token,
+      groupId: localGroupId,
+    );
+    if (resp['code'] != 0 || resp['data'] == null) return;
+    final groupData = resp['data']['group'] as Map<String, dynamic>;
+    final model = AgoraChatService.chatMessageToModel(chatMsg);
+    final preview = _formatMessagePreviewForRecentContact(
+      model.messageType,
+      model.content,
+    );
+    if (!mounted) return;
+    // 二次判重:等待网络期间可能已被其它路径(WS 系统通知)插入
+    final dup = _recentContacts.indexWhere(
+      (c) => c.isGroup && (c.groupId ?? c.userId) == localGroupId,
+    );
+    if (dup != -1) return;
+    final contact = RecentContactModel.group(
+      groupId: localGroupId,
+      groupName: groupData['name'] as String? ?? '未知群组',
+      avatar: groupData['avatar'] as String?,
+      lastMessage: preview,
+      lastMessageTime: model.createdAt.toIso8601String(),
+      remark: groupData['remark'] as String?,
+      doNotDisturb: groupData['do_not_disturb'] as bool? ?? false,
+    ).copyWith(unreadCount: 1, hasMentionedMe: false);
+    setState(() {
+      _recentContacts.insert(0, contact);
+      if (_selectedChatIndex >= 0) _selectedChatIndex++;
+      // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，插入后必须重建缓存才可见
+      _updateSortedRecentContacts();
+    });
+    _playNewMessageSound();
+  }
+
+  /// 🔵 收到会话列表中不存在的 1v1 消息(新好友):
+  /// - 好友审核系统消息("已通过"/"已驳回"/"发起申请")先同步本地待审核集合并刷新通讯录;
+  /// - 关系已通过(或普通消息)则把新会话原地插入列表。
+  /// 全程不走 _loadRecentContacts 全量刷新——服务端会话列表汇聚有延迟,
+  /// 刚建立的会话往往还查不到,刷新反而会把新会话"刷没"。
+  Future<void> _recoverUnknownUserConversation(
+    int userId,
+    ChatMessage chatMsg, {
+    required bool incrementUnread,
+  }) async {
+    if (userId == 0 || !_pendingUnknownUserFetches.add(userId)) return;
+    try {
+      final content = AgoraChatService.chatMessageToModel(chatMsg).content;
+      final isApproved = content == '请求添加好友【已通过】';
+      await _syncFriendFlowState(userId, content);
+      if (content == '请求添加好友【已驳回】') return; // 关系未建立,不出会话
+      if (!isApproved) {
+        // 普通消息或"发起申请":对端仍在待审核集合时保持会话隐藏
+        final pending = await Storage.getPendingContactsForCurrentUser();
+        if (pending.contains(userId)) return;
+      }
+
+      // 之前删过该会话又重新加回好友:清除删除标记,否则插入后会被偏好过滤掉
+      final contactKey = Storage.generateContactKey(isGroup: false, id: userId);
+      if (await Storage.isChatDeletedForCurrentUser(contactKey)) {
+        await Storage.removeDeletedChatForCurrentUser(contactKey);
+      }
+
+      if (!mounted) return;
+      final idx = _recentContacts.indexWhere(
+        (c) => !c.isGroup && c.userId == userId,
+      );
+      if (idx != -1) {
+        // 等待期间已被其它路径插入:原地补最后消息预览即可
+        _patchRecentContactWithMessage(chatMsg, incrementUnread: incrementUnread);
+        return;
+      }
+      await _insertUserContact(userId, chatMsg, incrementUnread: incrementUnread);
+    } catch (e) {
+      logger.debug('❌ [会话列表] 新好友会话补登失败 userId=$userId: $e');
+    } finally {
+      _pendingUnknownUserFetches.remove(userId);
+    }
+  }
+
+  /// 🔵 好友审核系统消息的公共善后:同步本地"待审核"集合并刷新通讯录。
+  /// 非审核类消息无副作用。"已通过"必须先清本地 pending 标记——
+  /// getRecentContacts 会过滤待审核联系人的会话,不清会一直隐藏该会话。
+  Future<void> _syncFriendFlowState(int userId, String content) async {
+    final isApproved = content == '请求添加好友【已通过】';
+    final isFriendFlow = isApproved ||
+        content == '请求添加好友【已驳回】' ||
+        content == '发起添加好友申请';
+    if (!isFriendFlow || userId == 0) return;
+    if (isApproved) {
+      await Storage.removePendingContactForCurrentUser(userId);
+    }
+    // 刷新通讯录(重新从服务端同步待审核集合 + 列表红点)
+    unawaited(_loadContacts());
+  }
+
+  /// 拉用户资料并把新好友会话插入列表顶部(带最后消息预览)。
+  Future<void> _insertUserContact(
+    int userId,
+    ChatMessage chatMsg, {
+    required bool incrementUnread,
+  }) async {
+    final token = _token;
+    if (token == null || token.isEmpty) return;
+    final resp = await ApiService.getUserByID(token: token, userId: userId);
+    if (resp['code'] != 0 || resp['data'] == null) return;
+    final userData = resp['data']['user'] as Map<String, dynamic>;
+    final model = AgoraChatService.chatMessageToModel(chatMsg);
+    final preview = _formatMessagePreviewForRecentContact(
+      model.messageType,
+      model.content,
+    );
+    if (!mounted) return;
+    // 二次判重:等待网络期间可能已被其它路径插入
+    final dup = _recentContacts.indexWhere(
+      (c) => !c.isGroup && c.userId == userId,
+    );
+    if (dup != -1) return;
+    final username = userData['username']?.toString() ?? userId.toString();
+    final fullName = userData['full_name']?.toString();
+    final contact = RecentContactModel(
+      userId: userId,
+      username: username,
+      fullName: (fullName != null && fullName.trim().isNotEmpty)
+          ? fullName.trim()
+          : username,
+      avatar: userData['avatar']?.toString(),
+      lastMessage: preview,
+      lastMessageTime: model.createdAt.toIso8601String(),
+      unreadCount: incrementUnread ? 1 : 0,
+      status: userData['status']?.toString() ?? 'offline',
+    );
+    setState(() {
+      _recentContacts.insert(0, contact);
+      if (_selectedChatIndex >= 0) _selectedChatIndex++;
+      // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，插入后必须重建缓存才可见
+      _updateSortedRecentContacts();
+    });
+    _playNewMessageSound();
   }
 
   /// 阶段4：撤回——把对应消息标记为已撤回
@@ -3691,6 +4029,44 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
       }
     }
+    if (changed) setState(() {});
+  }
+
+  /// 会话已读回执：对端进入会话读完了我发的全部消息（from=对端用户ID）。
+  /// 1) 当前聊天窗口内我发出的消息气泡置为已读（✓✓）；
+  /// 2) 会话列表该联系人的最后一条消息（若是我发的）单勾翻双勾。
+  void _handleAgoraConversationRead(String from) {
+    if (!mounted) return;
+    final peerId = int.tryParse(from) ?? 0;
+    if (peerId == 0) return;
+
+    bool changed = false;
+
+    // 聊天窗口气泡
+    if (!_isCurrentChatGroup && _currentChatUserId == peerId) {
+      for (var i = 0; i < _messages.length; i++) {
+        if (_messages[i].senderId == _currentUserId && !_messages[i].isRead) {
+          _messages[i] =
+              _messages[i].copyWith(isRead: true, readAt: DateTime.now());
+          changed = true;
+        }
+      }
+    }
+
+    // 会话列表单勾→双勾
+    final idx = _recentContacts.indexWhere(
+      (c) => !c.isGroup && !c.isFileAssistant && c.userId == peerId,
+    );
+    if (idx != -1 &&
+        _recentContacts[idx].lastMessageFromMe &&
+        !_recentContacts[idx].lastMessageRead) {
+      _recentContacts[idx] =
+          _recentContacts[idx].copyWith(lastMessageRead: true);
+      // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+      _updateSortedRecentContacts();
+      changed = true;
+    }
+
     if (changed) setState(() {});
   }
 
@@ -4598,6 +4974,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           if (_recentContacts[i].userId == userId) {
             _recentContacts[i] = _recentContacts[i].copyWith(status: newStatus);
             logger.debug('已更新最近联系人列表中用$userId 的状态为 $newStatus');
+            // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+            _updateSortedRecentContacts();
             break;
           }
         }
@@ -4655,6 +5033,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           if (_recentContacts[i].userId == userId) {
             _recentContacts[i] = _recentContacts[i].copyWith(status: 'online');
             logger.debug('已更新最近联系人列表中用$userId 的状态为 online');
+            // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+            _updateSortedRecentContacts();
             break;
           }
         }
@@ -4747,6 +5127,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           if (_recentContacts[i].userId == userId) {
             _recentContacts[i] = _recentContacts[i].copyWith(status: 'offline');
             logger.debug('已更新最近联系人列表中用$userId 的状态为 offline');
+            // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+            _updateSortedRecentContacts();
             break;
           }
         }
@@ -6232,6 +6614,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                   );
                 }
               }
+
+              // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，替换列表后必须重建缓存才可见
+              _updateSortedRecentContacts();
             });
           }
         } else {
@@ -6256,6 +6641,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                 );
               }
             }
+
+            // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，替换列表后必须重建缓存才可见
+            _updateSortedRecentContacts();
           });
 
           // 只在初次加载且没有当前聊天用户时，自动选择第一个联系人
@@ -6546,6 +6934,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
               ? 'group_${contact.groupId}'
               : 'user_${contact.userId}';
           _markedAsReadContacts.add(contactKey);
+
+          // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+          _updateSortedRecentContacts();
         }
       });
 
@@ -6710,6 +7101,29 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         _isScrollingToBottom = true; // 标记正在滚动，隐藏消息
       });
 
+      // 🔵 进入会话即发 Agora 会话已读回执（幂等，不依赖列表 unreadCount）：
+      // 之前只在 contact.unreadCount > 0 时才发，列表未读数未刷新/已被UI清零时会漏发，
+      // 导致对端一直看不到"已读"、且 Agora 服务端未读数不清零（重启后红点复现）。
+      // 单聊：通知对端(触发对端 onConversationRead) + 清零本地/服务端未读；
+      // 群聊：仅清零本地/服务端未读（群聊无对端会话回执语义）。
+      if (!isGroup && userId != 0) {
+        unawaited(
+          AgoraChatService().sendConversationReadAck(userId.toString()),
+        );
+        unawaited(
+          AgoraChatService()
+              .markConversationAllRead(conversationId: userId.toString()),
+        );
+      } else if (isGroup) {
+        final agoraGid = AgoraChatService().agoraGroupIdFor(userId);
+        if (agoraGid != null && agoraGid.isNotEmpty) {
+          unawaited(
+            AgoraChatService()
+                .markConversationAllRead(conversationId: agoraGid, isGroup: true),
+          );
+        }
+      }
+
       // 🔴 缓存消息位置（用于引用消息跳转）
       _cacheMessagePositions(userId, isGroup);
 
@@ -6732,6 +7146,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             // 🔧 修复：将该联系人添加到已读集合中
             final contactKey = isGroup ? 'group_$userId' : 'user_$userId';
             _markedAsReadContacts.add(contactKey);
+
+            // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+            _updateSortedRecentContacts();
           });
           // 标记消息为已读（同步到本地数据库）
           if (isGroup) {
@@ -7775,6 +8192,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                   .copyWith(
                     lastMessage: formattedMessage,
                     lastMessageTime: DateTime.now().toIso8601String(),
+                    lastMessageStatus: '',
+                    lastMessageFromMe: true,
+                    lastMessageRead: false,
                     unreadCount: 0, // 发送者正在查看，未读计数应为0
                   );
               // 🔧 修复：移除手动排序逻辑，依赖 _buildConversationListContent 中的自动排序
@@ -7799,11 +8219,14 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                   .copyWith(
                     lastMessage: formattedMessage,
                     lastMessageTime: DateTime.now().toIso8601String(),
+                    lastMessageStatus: '',
+                    lastMessageFromMe: true,
+                    lastMessageRead: false,
                   );
-              // 🔧 修复：移除手动排序逻辑，依赖 _buildConversationListContent 中的自动排序
-              // 避免手动排序和自动排序冲突导致的列表闪烁问题
             }
           }
+          // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+          _updateSortedRecentContacts();
         });
 
         // PC端优化：不刷新整个最近联系人列表，消息发送时已通过WebSocket回传更新
@@ -7842,19 +8265,21 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   // 选择图片（支持多选）
   Future<void> _pickImage() async {
     try {
-      // 请求存储权限
-      final status = await Permission.storage.request();
+      // 请求存储权限（仅移动端；permission_handler 无 macOS/Linux 实现，桌面端直接跳过）
+      if (Platform.isAndroid || Platform.isIOS) {
+        final status = await Permission.storage.request();
 
-      // Android 13+ 需要请求媒体权限
-      if (!status.isGranted) {
-        final mediaStatus = await Permission.photos.request();
-        if (!mediaStatus.isGranted) {
-          if (mounted) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(const SnackBar(content: Text('需要存储权限才能选择图片')));
+        // Android 13+ 需要请求媒体权限
+        if (!status.isGranted) {
+          final mediaStatus = await Permission.photos.request();
+          if (!mediaStatus.isGranted) {
+            if (mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('需要存储权限才能选择图片')));
+            }
+            return;
           }
-          return;
         }
       }
 
@@ -8161,19 +8586,21 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   // 选择视频（支持多选）
   Future<void> _pickVideo() async {
     try {
-      // 请求存储权限
-      final status = await Permission.storage.request();
+      // 请求存储权限（仅移动端；permission_handler 无 macOS/Linux 实现，桌面端直接跳过）
+      if (Platform.isAndroid || Platform.isIOS) {
+        final status = await Permission.storage.request();
 
-      // Android 13+ 需要请求媒体权限
-      if (!status.isGranted) {
-        final mediaStatus = await Permission.videos.request();
-        if (!mediaStatus.isGranted) {
-          if (mounted) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(const SnackBar(content: Text('需要存储权限才能选择视频')));
+        // Android 13+ 需要请求媒体权限
+        if (!status.isGranted) {
+          final mediaStatus = await Permission.videos.request();
+          if (!mediaStatus.isGranted) {
+            if (mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('需要存储权限才能选择视频')));
+            }
+            return;
           }
-          return;
         }
       }
 
@@ -8703,16 +9130,18 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   // 选择文件（支持多选，自动检测图片和视频）
   Future<void> _pickFiles() async {
     try {
-      // 请求存储权限
-      final status = await Permission.storage.request();
+      // 请求存储权限（仅移动端；permission_handler 无 macOS/Linux 实现，桌面端直接跳过）
+      if (Platform.isAndroid || Platform.isIOS) {
+        final status = await Permission.storage.request();
 
-      if (!status.isGranted) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('需要存储权限才能选择文件')));
+        if (!status.isGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('需要存储权限才能选择文件')));
+          }
+          return;
         }
-        return;
       }
 
       final result = await FilePicker.platform.pickFiles(
@@ -11125,6 +11554,13 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                     groupResponse['data'] != null) {
                   final groupData =
                       groupResponse['data']['group'] as Map<String, dynamic>;
+                  // 🔵 顺带登记新群的 本地群ID↔Agora群ID 映射:
+                  // 群消息收发、会话摘要(_bridgeConversationSummaries)都依赖它,
+                  // 缺失时该群会话会被静默丢弃
+                  AgoraChatService().registerGroupMapping(
+                    groupId,
+                    groupData['agora_group_id'] as String?,
+                  );
                   final groupName = groupData['name'] as String? ?? '未知群组';
                   final groupAvatar = groupData['avatar'] as String?; // 获取群组头像
                   final remark = groupData['remark'] as String?;
@@ -11154,19 +11590,27 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                         hasMentionedMe: false, // 系统消息不是@消息
                       );
 
-                  setState(() {
-                    // 将群组添加到列表顶部
-                    _recentContacts.insert(0, groupContact);
-                    // 如果之前有选中的联系人，索引需要加1
-                    if (_selectedChatIndex >= 0) {
-                      _selectedChatIndex++;
-                    }
-                  });
+                  // 二次判重:等待群详情接口期间,Agora 消息路径可能已插入该会话
+                  final dup = _recentContacts.indexWhere(
+                    (c) => c.isGroup && c.groupId == groupId,
+                  );
+                  if (dup == -1 && mounted) {
+                    setState(() {
+                      // 将群组添加到列表顶部
+                      _recentContacts.insert(0, groupContact);
+                      // 如果之前有选中的联系人，索引需要加1
+                      if (_selectedChatIndex >= 0) {
+                        _selectedChatIndex++;
+                      }
+                      // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，插入后必须重建缓存才可见
+                      _updateSortedRecentContacts();
+                    });
 
-                  logger.debug('✅ 已将群组添加到最近联系人列表');
+                    logger.debug('✅ 已将群组添加到最近联系人列表');
 
-                  // 播放新消息提示音（有新未读消息）
-                  _playNewMessageSound();
+                    // 播放新消息提示音（有新未读消息）
+                    _playNewMessageSound();
+                  }
                 }
               }
             } catch (e) {
@@ -11187,8 +11631,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                         createdAt ?? DateTime.now().toIso8601String(),
                     hasMentionedMe: false, // 系统消息不是@消息
                   );
-              // 🔧 修复：移除手动排序逻辑，依赖 _buildConversationListContent 中的自动排序
-              // 避免手动排序和自动排序冲突导致的列表闪烁问题
+              // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+              _updateSortedRecentContacts();
             });
 
             // 播放新消息提示音（有新未读消息）
@@ -13850,6 +14294,63 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
   // ============ @功能相关方法结束 ============
   // 显示表情选择器（无遮罩，定位在按钮附近）
+  // 附件菜单（Telegram 风格：点击回形针按钮，在按钮上方弹出）
+  void _showAttachmentMenu(BuildContext buttonContext) {
+    final RenderBox button = buttonContext.findRenderObject() as RenderBox;
+    final RenderBox overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final Offset buttonTopLeft = button.localToGlobal(
+      Offset.zero,
+      ancestor: overlay,
+    );
+    // 4 个菜单项，每项高 44，上下留白
+    const double menuHeight = 4 * 44.0 + 16;
+
+    showMenu<void>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        buttonTopLeft.dx,
+        buttonTopLeft.dy - menuHeight - 8,
+        buttonTopLeft.dx + 200,
+        buttonTopLeft.dy - 8,
+      ),
+      color: Colors.white,
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      items: [
+        _buildAttachMenuItem(Icons.photo_outlined, '照片', _pickImage),
+        _buildAttachMenuItem(Icons.videocam_outlined, '视频', _pickVideo),
+        _buildAttachMenuItem(
+          Icons.insert_drive_file_outlined,
+          '文档',
+          _pickFiles,
+        ),
+        _buildAttachMenuItem(Icons.screenshot_outlined, '截图', _captureScreen),
+      ],
+    );
+  }
+
+  PopupMenuItem<void> _buildAttachMenuItem(
+    IconData icon,
+    String label,
+    VoidCallback onSelected,
+  ) {
+    return PopupMenuItem<void>(
+      height: 44,
+      onTap: onSelected,
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: const Color(0xFF707579)),
+          const SizedBox(width: 14),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 14, color: Color(0xFF222222)),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showEmojiPicker(BuildContext context) {
     // 获取所有表情图
     final List<String> emotions = [
@@ -13975,6 +14476,16 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
     final offset = renderBox.localToGlobal(Offset.zero);
 
+    // 弹窗尺寸固定为 320x240，限制在屏幕内（按钮靠右时向左偏移，避免被裁剪）
+    final screenSize = MediaQuery.of(context).size;
+    double panelLeft = offset.dx;
+    if (panelLeft + 320 > screenSize.width - 8) {
+      panelLeft = screenSize.width - 320 - 8;
+    }
+    if (panelLeft < 8) panelLeft = 8;
+    double panelTop = offset.dy - 250;
+    if (panelTop < 8) panelTop = 8;
+
     // 创建 OverlayEntry
     late OverlayEntry overlayEntry;
     overlayEntry = OverlayEntry(
@@ -13992,8 +14503,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           ),
           // 表情选择器弹
           Positioned(
-            left: offset.dx,
-            top: offset.dy - 250, // 显示在按钮上
+            left: panelLeft,
+            top: panelTop, // 显示在按钮上
             child: GestureDetector(
               onTap: () {
                 // 阻止事件冒泡到外层的 GestureDetector
@@ -14901,7 +15412,24 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                 ),
                 const SizedBox(width: 8),
                 PopupMenuButton<String>(
-                  icon: const Icon(Icons.add, color: Color(0xFF666666)),
+                  // "发起新聊天"按钮：浅灰圆底 + 描边铅笔，与左侧搜索胶囊同色系，
+                  // 不再是突兀的实心蓝方块
+                  padding: EdgeInsets.zero,
+                  icon: Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF5F5F5),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Icon(
+                      Icons.edit_outlined,
+                      color: Color(0xFF8A8A8A),
+                      size: 20,
+                    ),
+                  ),
+                  tooltip: '发起新聊天',
                   offset: const Offset(0, 40),
                   itemBuilder: (BuildContext context) => [
                     const PopupMenuItem<String>(
@@ -15042,7 +15570,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
 
     // 搜索框为空，显示最近联系人列表
-    if (_isLoadingRecentContacts) {
+    // 仅在列表尚无数据时整屏显示加载中；已有数据的后台刷新不打断列表展示
+    if (_isLoadingRecentContacts && _recentContacts.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
 
@@ -15189,6 +15718,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
               // 将该联系人添加到已读集合中
               _markedAsReadContacts.add(contactKey);
 
+              // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+              _updateSortedRecentContacts();
+
               logger.debug(
                 '📧 点击联系人，已清除UI上的未读计数（原未读数：${contact.unreadCount}条）',
               );
@@ -15221,239 +15753,311 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             _loadMessageHistory(contactId, isGroup: contact.isGroup);
           }
         },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          color: isSelected ? const Color(0xFFF5F5F5) : Colors.white,
-          child: Row(
-            children: [
-              // 头像（带未读数量气泡和状态指示器
-              Stack(
-                children: [
-                  // 🔴 文件传输助手：绿色文件夹图标
-                  contact.isFileAssistant
-                      ? Container(
-                          width: 44,
-                          height: 44,
+        // 🔵 Telegram macOS 风格：圆形头像、选中项蓝色圆角高亮（文字全白）、
+        // 时间前显示自己最后一条消息的单勾/双勾
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: isSelected ? _tgSelectedBlue : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                // 头像（带未读数量气泡和状态指示器）
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    _buildTelegramAvatarPc(contact),
+                    // 状态指示器（右下角 仅对个人对话显示，文件传输助手除外）
+                    if (!isGroup && !contact.isFileAssistant)
+                      Positioned(
+                        right: 1,
+                        bottom: 1,
+                        child: Container(
+                          width: 11,
+                          height: 11,
                           decoration: BoxDecoration(
-                            color: const Color(0xFF07C160), // 微信绿色
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Icon(
-                            Icons.folder_open,
-                            color: Colors.white,
-                            size: 24,
-                          ),
-                        )
-                      : Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: (contact.avatar != null && contact.avatar!.isNotEmpty)
-                                ? Colors.transparent // 有头像时背景透明
-                                : isGroup
-                                    ? const Color(0xFF52C41A) // 群组使用绿色
-                                    : const Color(0xFF4A90E2), // 个人使用蓝色
-                            borderRadius: BorderRadius.circular(4),
-                            // 有头像时显示头像图片（群组和个人都支持）
-                            image: (contact.avatar != null && contact.avatar!.isNotEmpty)
-                                ? DecorationImage(
-                                    image: NetworkImage(contact.avatar!),
-                                    fit: BoxFit.cover,
-                                  )
-                                : null,
-                          ),
-                          alignment: Alignment.center,
-                          child: (contact.avatar != null && contact.avatar!.isNotEmpty)
-                              ? null // 有头像时不显示任何子组件
-                              : isGroup
-                                  ? const Icon(
-                                      Icons.people, // 群组默认图标
-                                      color: Colors.white,
-                                      size: 24,
-                                    )
-                                  : Text(
-                                      contact.avatarText,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                        ),
-                  // 状态指示器（右下角 仅对个人对话显示，文件传输助手除外）
-                  if (!isGroup && !contact.isFileAssistant)
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                          color: _getStatusColor(contact.status),
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: isSelected
-                                ? const Color(0xFFF5F5F5)
-                                : Colors.white,
-                            width: 2,
+                            color: _getStatusColor(contact.status),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSelected ? _tgSelectedBlue : Colors.white,
+                              width: 2,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  // 未读数量气泡（右上角）
-                  if (contact.unreadCount > 0)
-                    Positioned(
-                      right: -2,
-                      top: -2,
-                      child: contact.doNotDisturb
-                          ? // 消息免打扰（一对一或群组）：显示小红点
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: const BoxDecoration(
-                                color: Colors.red,
-                                shape: BoxShape.circle,
-                              ),
-                            )
-                          : // 正常情况：显示未读数量气泡
-                            Container(
-                              constraints: contact.unreadCount < 10
-                                  ? null
-                                  : const BoxConstraints(minWidth: 16),
-                              width: contact.unreadCount < 10 ? 16 : null,
-                              height: 16,
-                              padding: contact.unreadCount < 10
-                                  ? null
-                                  : const EdgeInsets.symmetric(horizontal: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.red,
-                                shape: contact.unreadCount < 10
-                                    ? BoxShape.circle
-                                    : BoxShape.rectangle,
-                                borderRadius: contact.unreadCount < 10
+                    // 未读数量气泡（右上角）
+                    if (contact.unreadCount > 0)
+                      Positioned(
+                        right: -2,
+                        top: -2,
+                        child: contact.doNotDisturb
+                            ? Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  color: Colors.red,
+                                  shape: BoxShape.circle,
+                                ),
+                              )
+                            : Container(
+                                constraints: contact.unreadCount < 10
                                     ? null
-                                    : BorderRadius.circular(8),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                contact.unreadCount > 99
-                                    ? '99+'
-                                    : '${contact.unreadCount}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
-                                  height: 1.0,
+                                    : const BoxConstraints(minWidth: 16),
+                                width: contact.unreadCount < 10 ? 16 : null,
+                                height: 16,
+                                padding: contact.unreadCount < 10
+                                    ? null
+                                    : const EdgeInsets.symmetric(horizontal: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.red,
+                                  shape: contact.unreadCount < 10
+                                      ? BoxShape.circle
+                                      : BoxShape.rectangle,
+                                  borderRadius: contact.unreadCount < 10
+                                      ? null
+                                      : BorderRadius.circular(8),
                                 ),
-                              ),
-                            ),
-                    ),
-                ],
-              ),
-              const SizedBox(width: 12),
-              // 消息内容
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Row(
-                            children: [
-                              // 名称
-                              Flexible(
+                                alignment: Alignment.center,
                                 child: Text(
-                                  contact.isFileAssistant 
-                                      ? AppLocalizations.of(context).translate('file_transfer_assistant')
-                                      : contact.displayName,
+                                  contact.unreadCount > 99
+                                      ? '99+'
+                                      : '${contact.unreadCount}',
                                   style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w500,
-                                    color: Color(0xFF333333),
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    height: 1.0,
                                   ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              // 消息免打扰图标（一对一或群组）
-                              if (contact.doNotDisturb)
-                                Padding(
-                                  padding: const EdgeInsets.only(left: 4),
-                                  child: Icon(
-                                    Icons.notifications_off,
-                                    size: 14,
-                                    color: Colors.grey[600],
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _formatMessageTime(contact.lastMessageTime),
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF999999),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    // 🔴 如果最后一条消息已撤回，显示"消息已撤回"
-                    // 如果是群组消息且有人@我，显示红色的"[有人@我]"前缀
-                    contact.lastMessageStatus == 'recalled'
-                        ? const Text(
-                            '消息已撤回',
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Color(0xFF999999),
-                              fontStyle: FontStyle.italic,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          )
-                        : contact.isGroup && contact.hasMentionedMe
-                        ? RichText(
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            text: TextSpan(
-                              children: [
-                                const TextSpan(
-                                  text: '[有人@我] ',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Colors.red,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                TextSpan(
-                                  text: contact.lastMessage,
-                                  style: const TextStyle(
-                                    fontSize: 13,
-                                    color: Color(0xFF999999),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          )
-                        : Text(
-                            contact.lastMessage,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: Color(0xFF999999),
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
+                      ),
                   ],
                 ),
-              ),
-            ],
+                const SizedBox(width: 10),
+                // 消息内容
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Row(
+                              children: [
+                                // 名称
+                                Flexible(
+                                  child: Text(
+                                    contact.isFileAssistant
+                                        ? AppLocalizations.of(context).translate('file_transfer_assistant')
+                                        : contact.displayName,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: isSelected
+                                          ? Colors.white
+                                          : const Color(0xFF222222),
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                // 消息免打扰图标（一对一或群组）
+                                if (contact.doNotDisturb)
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 4),
+                                    child: Icon(
+                                      Icons.notifications_off,
+                                      size: 14,
+                                      color: isSelected
+                                          ? Colors.white70
+                                          : Colors.grey[600],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          // 自己发出的最后一条消息：单勾（已发送）/ 双勾（对方已读）
+                          if (_showSentChecks(contact))
+                            Padding(
+                              padding: const EdgeInsets.only(right: 3),
+                              child: Icon(
+                                contact.lastMessageRead
+                                    ? Icons.done_all
+                                    : Icons.done,
+                                size: 15,
+                                color: isSelected
+                                    ? Colors.white
+                                    : _tgSelectedBlue,
+                              ),
+                            ),
+                          Text(
+                            _formatMessageTime(contact.lastMessageTime),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isSelected
+                                  ? Colors.white.withOpacity(0.85)
+                                  : const Color(0xFF999999),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      // 🔴 如果最后一条消息已撤回，显示"消息已撤回"
+                      // 如果是群组消息且有人@我，显示红色的"[有人@我]"前缀
+                      contact.lastMessageStatus == 'recalled'
+                          ? Text(
+                              '消息已撤回',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: isSelected
+                                    ? Colors.white.withOpacity(0.85)
+                                    : const Color(0xFF999999),
+                                fontStyle: FontStyle.italic,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            )
+                          : contact.isGroup && contact.hasMentionedMe
+                          ? RichText(
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              text: TextSpan(
+                                children: [
+                                  TextSpan(
+                                    text: '[有人@我] ',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: isSelected
+                                          ? Colors.white
+                                          : Colors.red,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  TextSpan(
+                                    text: contact.lastMessage,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: isSelected
+                                          ? Colors.white.withOpacity(0.85)
+                                          : const Color(0xFF999999),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : Text(
+                              contact.lastMessage,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: isSelected
+                                    ? Colors.white.withOpacity(0.85)
+                                    : const Color(0xFF999999),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
+    );
+  }
+
+  // Telegram macOS 会话列表选中项蓝色
+  static const Color _tgSelectedBlue = Color(0xFF3F7DDB);
+
+  // Telegram 官方头像渐变色（上浅下深），按 ID 取模固定分配
+  static const List<List<Color>> _avatarGradients = [
+    [Color(0xFFFF885E), Color(0xFFFF516A)], // 红
+    [Color(0xFFFFCD6A), Color(0xFFFFA85C)], // 橙
+    [Color(0xFF82B1FF), Color(0xFF665FFF)], // 蓝紫
+    [Color(0xFFA0DE7E), Color(0xFF54CB68)], // 绿
+    [Color(0xFF53EDD6), Color(0xFF28C9B7)], // 青
+    [Color(0xFF72D5FD), Color(0xFF2A9EF1)], // 蓝
+    [Color(0xFFE0A2F3), Color(0xFFD669ED)], // 粉
+  ];
+
+  /// 头像字母：取前两个单词的首字符（Sean Scott → SS，儿 玉 → 儿玉，mgf3b1bot → M）
+  String _avatarInitials(String name) {
+    final parts =
+        name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    if (parts.isEmpty) return '?';
+    String firstCharOf(String s) => String.fromCharCode(s.runes.first);
+    if (parts.length >= 2) {
+      return (firstCharOf(parts[0]) + firstCharOf(parts[1])).toUpperCase();
+    }
+    return firstCharOf(parts[0]).toUpperCase();
+  }
+
+  /// 是否显示发送状态对勾（仅自己发出的最后一条消息，Telegram 风格）
+  bool _showSentChecks(RecentContactModel contact) {
+    return !contact.isFileAssistant &&
+        contact.lastMessageFromMe &&
+        contact.lastMessage.isNotEmpty &&
+        contact.lastMessageStatus != 'recalled';
+  }
+
+  /// Telegram 风格 50px 圆形头像：有图用图，无图用渐变 + 字母
+  Widget _buildTelegramAvatarPc(RecentContactModel contact) {
+    const double size = 50;
+    if (contact.isFileAssistant) {
+      return Container(
+        width: size,
+        height: size,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0xFF07C160),
+        ),
+        child: const Icon(Icons.folder_open, color: Colors.white, size: 26),
+      );
+    }
+    final hasAvatar = contact.avatar != null && contact.avatar!.isNotEmpty;
+    if (hasAvatar) {
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          image: DecorationImage(
+            image: NetworkImage(contact.avatar!),
+            fit: BoxFit.cover,
+          ),
+        ),
+      );
+    }
+    final gid = contact.isGroup ? (contact.groupId ?? contact.userId) : contact.userId;
+    final colors = _avatarGradients[gid % _avatarGradients.length];
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: colors,
+        ),
+      ),
+      alignment: Alignment.center,
+      child: contact.isGroup && contact.displayName.isEmpty
+          ? const Icon(Icons.people, color: Colors.white, size: 24)
+          : Text(
+              _avatarInitials(contact.displayName),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
     );
   }
 
@@ -15837,7 +16441,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           // 如果有状态变化，更新UI
           if (hasChanges && mounted) {
             setState(() {
-              // 触发UI更新
+              // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，原地更新后必须重建缓存才可见
+              _updateSortedRecentContacts();
             });
           }
         }
@@ -15922,7 +16527,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   }
 
   // 空聊天状态（未选择会话时显示背景图，文字已包含在图片中）
+  // 首次进入、会话列表尚在加载时叠加"加载中"指示，避免闪现空会话页
   Widget _buildEmptyChatWindow() {
+    final isInitialLoading =
+        _isLoadingRecentContacts && _recentContacts.isEmpty;
     return Expanded(
       child: Container(
         decoration: const BoxDecoration(
@@ -15931,6 +16539,25 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             fit: BoxFit.cover,
           ),
         ),
+        child: isInitialLoading
+            ? const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: CircularProgressIndicator(strokeWidth: 3),
+                    ),
+                    SizedBox(height: 12),
+                    Text(
+                      '加载中...',
+                      style: TextStyle(fontSize: 14, color: Color(0xFF999999)),
+                    ),
+                  ],
+                ),
+              )
+            : null,
       ),
     );
   }
@@ -16029,12 +16656,20 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     );
   }
 
+  // 聊天背景壁纸装饰（PC 端专用壁纸）
+  static const BoxDecoration _pcChatBgDecoration = BoxDecoration(
+    image: DecorationImage(
+      image: AssetImage('assets/images/chat_pc_bg.png'),
+      fit: BoxFit.cover,
+    ),
+  );
+
   // 消息列表区域
   Widget _buildMessageListArea() {
     // 加载
     if (_isLoadingMessages) {
       return Container(
-        color: const Color(0xFFF5F5F5),
+        decoration: _pcChatBgDecoration,
         child: const Center(child: CircularProgressIndicator()),
       );
     }
@@ -16042,7 +16677,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     // 加载错误
     if (_messagesError != null) {
       return Container(
-        color: const Color(0xFFF5F5F5),
+        decoration: _pcChatBgDecoration,
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -16088,7 +16723,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     // 消息列表
     if (_messages.isEmpty) {
       return Container(
-        color: const Color(0xFFF5F5F5),
+        decoration: _pcChatBgDecoration,
         child: const Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -16117,7 +16752,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     return Opacity(
       opacity: _isScrollingToBottom ? 0.0 : 1.0, // 滚动时隐藏，避免显示第一条消息
       child: Container(
-        color: const Color(0xFFF5F5F5),
+        decoration: _pcChatBgDecoration,
         child: ListView.builder(
           controller: _messageScrollController,
           padding: const EdgeInsets.all(16),
@@ -16575,7 +17210,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
               : MainAxisAlignment.start,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!isSelf) ...[
+            // Telegram 风格：单聊不显示头像，仅群聊显示对方头像
+            if (!isSelf && _isCurrentChatGroup) ...[
               // 左侧头像
               _buildAvatar(
                 avatarText: '加载中',
@@ -16622,8 +17258,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                     constraints: const BoxConstraints(maxWidth: 300),
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: isSelf ? const Color(0xFF95EC69) : Colors.white,
-                      borderRadius: BorderRadius.circular(4),
+                      color: isSelf ? const Color(0xFFE5F8C9) : Colors.white,
+                      borderRadius: BorderRadius.circular(16),
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black.withOpacity(0.05),
@@ -16637,16 +17273,6 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                 ],
               ),
             ),
-            if (isSelf) ...[
-              const SizedBox(width: 8),
-              // 右侧头像
-              _buildAvatar(
-                avatarText: _getUserAvatarText(),
-                avatarUrl: _userAvatar,
-                isOnline: true,
-                size: 36,
-              ),
-            ],
           ],
         ),
       );
@@ -16780,8 +17406,40 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         // 计算消息内容的最大宽度为对话框宽度的60%
         final maxMessageWidth = constraints.maxWidth * 0.6;
 
+        // 🔵 Telegram 风格（对齐移动端）：文字消息把"时间+状态"的隐形占位追加在
+        // 文字末尾，让右下角的时间嵌进最后一行文字，短消息气泡随时间加宽不再裁切。
+        final bool timeInline = message.status != 'recalled' &&
+            (message.messageType == 'text' || message.messageType == 'quoted');
+        final InlineSpan timeReserveSpan = WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: IgnorePointer(
+            child: Opacity(
+              opacity: 0,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      message.formattedTime,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    if (isSelf) ...[
+                      const SizedBox(width: 3),
+                      _buildMessageStatusIcon(
+                        message,
+                        isGroupChat: _isCurrentChatGroup,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
         return Container(
-          margin: const EdgeInsets.only(bottom: 16),
+          margin: const EdgeInsets.only(bottom: 6),
           child: Row(
             mainAxisAlignment: isSelf
                 ? MainAxisAlignment.end
@@ -16807,7 +17465,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                   ),
                 ),
               ],
-              if (!isSelf) ...[
+              // Telegram 风格：单聊不显示头像，仅群聊显示对方头像（圆形）
+              if (!isSelf && _isCurrentChatGroup) ...[
                 // 对方头像（可点击查看用户信息
                 GestureDetector(
                   onTap: () {
@@ -16815,20 +17474,19 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                     _showOtherUserInfo(message.senderId);
                   },
                   child: Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF4A90E2),
-                      borderRadius: BorderRadius.circular(4),
+                    width: 36,
+                    height: 36,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF4A90E2),
+                      shape: BoxShape.circle,
                     ),
                     alignment: Alignment.center,
                     child: senderAvatar != null && senderAvatar.isNotEmpty
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(4),
+                        ? ClipOval(
                             child: Image.network(
                               senderAvatar,
-                              width: 40,
-                              height: 40,
+                              width: 36,
+                              height: 36,
                               fit: BoxFit.cover,
                               errorBuilder: (context, error, stackTrace) {
                                 return Text(
@@ -16852,7 +17510,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                           ),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 8),
               ],
               // 消息内容（最大宽0%
               ConstrainedBox(
@@ -16863,35 +17521,22 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                       : CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // 显示时间和发送者信
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            () {
-                              if (isSelf) {
-                                return message.formattedTime;
-                              }
-                              final nameToShow = displayName.isNotEmpty
-                                  ? displayName
-                                  : 'Unknown';
-                              return '$nameToShow, ${message.formattedTime}';
-                            }(),
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFF999999),
-                            ),
+                    // Telegram 风格：时间移入气泡内，群聊中在气泡上方显示发送者名字
+                    if (!isSelf && _isCurrentChatGroup)
+                      Padding(
+                        padding: const EdgeInsets.only(
+                          left: 6,
+                          bottom: 2,
+                        ),
+                        child: Text(
+                          displayName.isNotEmpty ? displayName : 'Unknown',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF3390EC),
+                            fontWeight: FontWeight.w500,
                           ),
-                          // 🔴 修复：添加状态图标（仅自己发送的消息显示，根据实际聊天类型判断）
-                          if (isSelf) ...[
-                            const SizedBox(width: 6),
-                            _buildMessageStatusIcon(message, isGroupChat: _isCurrentChatGroup),
-                          ],
-                        ],
+                        ),
                       ),
-                    ),
                     // 添加右键菜单支持
                     GestureDetector(
                       onSecondaryTapDown: (details) {
@@ -16909,20 +17554,55 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                           details.globalPosition,
                         );
                       },
-                      child: Container(
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          // 🔵 Telegram 风格小尾巴（与移动端一致），媒体消息不加
+                          if (message.messageType != 'image' &&
+                              message.messageType != 'video')
+                            Positioned(
+                              bottom: 0,
+                              right: isSelf ? -5 : null,
+                              left: isSelf ? null : -5,
+                              child: CustomPaint(
+                                size: const Size(11, 15),
+                                painter: BubbleTailPainter(
+                                  color: _highlightedMessageId == message.id
+                                      ? const Color(0xFFFFF9E6)
+                                      : isSelf
+                                          ? const Color(0xFFE5F8C9)
+                                          : Colors.white,
+                                  isMe: isSelf,
+                                ),
+                              ),
+                            ),
+                          Container(
                         padding: message.messageType == 'image'
                             ? EdgeInsets.zero
                             : const EdgeInsets.symmetric(
                                 horizontal: 12,
-                                vertical: 10,
+                                vertical: 8,
                               ),
                         decoration: BoxDecoration(
                           color: _highlightedMessageId == message.id
                               ? const Color(0xFFFFF9E6) // 高亮背景色（淡黄色）
                               : isSelf
-                              ? const Color(0xFFD6EBFF)
+                              ? const Color(0xFFE5F8C9) // Telegram 风格：发送方浅绿
                               : Colors.white,
-                          borderRadius: BorderRadius.circular(4),
+                          // 尾巴一侧底角为直角，气泡边缘平滑延伸进尾巴
+                          borderRadius: BorderRadius.only(
+                            topLeft: const Radius.circular(18),
+                            topRight: const Radius.circular(18),
+                            bottomLeft: Radius.circular(isSelf ? 18 : 0),
+                            bottomRight: Radius.circular(isSelf ? 0 : 18),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.06),
+                              blurRadius: 1,
+                              offset: const Offset(0, 1),
+                            ),
+                          ],
                           border: _highlightedMessageId == message.id
                               ? Border.all(
                                   color: const Color(0xFFFFD700),
@@ -16930,7 +17610,14 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                 )
                               : null,
                         ),
-                        child: Column(
+                        child: Stack(
+                          children: [
+                            Padding(
+                              // 文字类消息时间嵌入末行（隐形占位），无需整行底部留白
+                              padding: (message.messageType == 'image' || timeInline)
+                                  ? EdgeInsets.zero
+                                  : const EdgeInsets.only(bottom: 16),
+                              child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             // 如果消息被撤回，显示"已被撤销"提示
@@ -17219,14 +17906,20 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                       ],
                                     )
                                   : message.messageType == 'quoted'
-                                  ? ExtendedText(
-                                      message.content,
-                                      specialTextSpanBuilder:
-                                          MessageEmojiTextSpanBuilder(),
-                                      style: const TextStyle(
-                                        fontSize: 14,
-                                        color: Color(0xFF333333),
-                                        height: 1.5,
+                                  ? Text.rich(
+                                      TextSpan(
+                                        children: [
+                                          MessageEmojiTextSpanBuilder().build(
+                                            message.content,
+                                            textStyle: const TextStyle(
+                                              fontSize: 14,
+                                              color: Color(0xFF333333),
+                                              height: 1.5,
+                                            ),
+                                          ),
+                                          // 时间占位（隐形），保证时间不与文字重叠
+                                          timeReserveSpan,
+                                        ],
                                       ),
                                     )
                                   : message.messageType == 'image'
@@ -17239,7 +17932,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                         );
                                       },
                                       child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(4),
+                                        borderRadius: BorderRadius.circular(
+                                          14,
+                                        ),
                                         child: ConstrainedBox(
                                           constraints: const BoxConstraints(
                                             maxWidth: 300,
@@ -17605,67 +18300,83 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                               );
                                             },
                                           ),
-                                        // 消息内容
-                                        ExtendedText(
-                                          message.content,
-                                          specialTextSpanBuilder:
-                                              MessageEmojiTextSpanBuilder(),
-                                          style: const TextStyle(
-                                            fontSize: 14,
-                                            color: Color(0xFF333333),
-                                            height: 1.5,
+                                        // 消息内容（末尾追加隐形时间占位，时间嵌入最后一行）
+                                        Text.rich(
+                                          TextSpan(
+                                            children: [
+                                              MessageEmojiTextSpanBuilder()
+                                                  .build(
+                                                message.content,
+                                                textStyle: const TextStyle(
+                                                  fontSize: 14,
+                                                  color: Color(0xFF333333),
+                                                  height: 1.5,
+                                                ),
+                                              ),
+                                              timeReserveSpan,
+                                            ],
                                           ),
                                         ),
                                       ],
                                     ),
                           ],
                         ),
+                            ),
+                            // Telegram 风格：时间和状态显示在气泡内右下角
+                            Positioned(
+                              right: message.messageType == 'image' ? 6 : 0,
+                              bottom: message.messageType == 'image' ? 6 : 0,
+                              child: Container(
+                                padding: message.messageType == 'image'
+                                    ? const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 2,
+                                      )
+                                    : EdgeInsets.zero,
+                                decoration: message.messageType == 'image'
+                                    ? BoxDecoration(
+                                        color: Colors.black38,
+                                        borderRadius: BorderRadius.circular(
+                                          10,
+                                        ),
+                                      )
+                                    : null,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      message.formattedTime,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color:
+                                            message.messageType == 'image'
+                                            ? Colors.white
+                                            : (isSelf
+                                                  ? const Color(0xFF5FA34F)
+                                                  : const Color(0xFF999999)),
+                                      ),
+                                    ),
+                                    if (isSelf) ...[
+                                      const SizedBox(width: 3),
+                                      _buildMessageStatusIcon(
+                                        message,
+                                        isGroupChat: _isCurrentChatGroup,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                          ),
+                        ],
                       ),
                     ), // GestureDetector结束
                   ],
                 ),
               ),
-              if (isSelf) ...[
-                const SizedBox(width: 12),
-                // 自己的头像
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF4A90E2),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  alignment: Alignment.center,
-                  child: senderAvatar != null && senderAvatar.isNotEmpty
-                      ? ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: Image.network(
-                            senderAvatar,
-                            width: 40,
-                            height: 40,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) {
-                              return Text(
-                                avatarText,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              );
-                            },
-                          ),
-                        )
-                      : Text(
-                          avatarText,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                ),
-              ],
+              // Telegram 风格：自己发送的消息不显示头像
             ],
           ),
         );
@@ -18199,11 +18910,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         color: Colors.grey[400],
       );
     } else if (message.isRead && message.readAt != null) {
-      // 🔴 已读（根据isRead字段判断）：显示蓝色双钩
+      // 🔴 已读（根据isRead字段判断）：显示绿色双钩（Telegram 风格）
       return const Icon(
         Icons.done_all,
         size: 14,
-        color: Colors.blue,
+        color: Color(0xFF4FAE4E),
       );
     } else {
       // 🔴 未读或未确认：显示灰色单勾
@@ -18403,70 +19114,57 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   }
 
   Widget _buildInputArea() {
+    // 是否正在发送/上传
+    final bool isBusy =
+        _isSendingMessage ||
+        _isUploadingImage ||
+        _isUploadingVideo ||
+        _isUploadingFile;
+    // 输入框是否有内容（文本或待发送的图片/视频/文件）
+    final bool hasContent =
+        _hasInputText ||
+        _selectedImageFiles.isNotEmpty ||
+        _selectedVideoFiles.isNotEmpty ||
+        _selectedFiles.isNotEmpty;
+
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
         border: Border(top: BorderSide(color: Color(0xFFE5E5E5), width: 1)),
       ),
-      child: Column(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // 工具
-          Container(
-            height: 48,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: [
-                Builder(
-                  builder: (btnContext) => IconButton(
-                    icon: const Icon(
-                      Icons.emoji_emotions_outlined,
-                      color: Color(0xFF666666),
-                    ),
-                    onPressed: () => _showEmojiPicker(btnContext),
+          // 附件按钮（回形针，点击弹出附件菜单）
+          Builder(
+            builder: (btnContext) => Material(
+              color: Colors.transparent,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: () => _showAttachmentMenu(btnContext),
+                child: Container(
+                  width: 42,
+                  height: 42,
+                  alignment: Alignment.center,
+                  child: const Icon(
+                    Icons.attach_file,
+                    color: Color(0xFF707579),
+                    size: 24,
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(
-                    Icons.image_outlined,
-                    color: Color(0xFF666666),
-                  ),
-                  onPressed: _pickImage,
-                ),
-                IconButton(
-                  icon: const Icon(
-                    Icons.videocam_outlined,
-                    color: Color(0xFF666666),
-                  ),
-                  onPressed: _pickVideo,
-                  tooltip: '视频',
-                ),
-                IconButton(
-                  icon: const Icon(
-                    Icons.upload_file_outlined,
-                    color: Color(0xFF666666),
-                  ),
-                  onPressed: _pickFiles,
-                ),
-                IconButton(
-                  icon: const Icon(
-                    Icons.screenshot_outlined,
-                    color: Color(0xFF666666),
-                  ),
-                  onPressed: _captureScreen,
-                  tooltip: '截图',
-                ),
-              ],
+              ),
             ),
           ),
-          // 输入框和发送按钮（按钮在输入框右下角内部）
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          const SizedBox(width: 8),
+          // 输入框
+          Expanded(
             child: Stack(
               children: [
                 // 输入框（撑满整个宽度，根据是否有引用消息/图片/文件动态调整高度）
                 Container(
                   height: () {
-                    int baseHeight = 126;
+                    int baseHeight = 44;
                     if (_quotedMessage != null) baseHeight += 70; // 引用消息
                     if (_selectedImageFiles.isNotEmpty) baseHeight += 80;
                     if (_selectedVideoFiles.isNotEmpty) baseHeight += 80;
@@ -18474,8 +19172,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                     return baseHeight.toDouble();
                   }(),
                   decoration: BoxDecoration(
+                    color: Colors.white,
                     border: Border.all(color: const Color(0xFFE5E5E5)),
-                    borderRadius: BorderRadius.circular(4),
+                    borderRadius: BorderRadius.circular(22),
                   ),
                   child: Stack(
                     children: [
@@ -18553,6 +19252,14 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                             specialTextSpanBuilder: EmojiTextSpanBuilder(),
                             maxLines: null,
                             expands: true,
+                            // 无引用/附件预览时单行垂直居中；有预览时顶部对齐（配合动态 topPadding）
+                            textAlignVertical:
+                                (_quotedMessage == null &&
+                                    _selectedImageFiles.isEmpty &&
+                                    _selectedVideoFiles.isEmpty &&
+                                    _selectedFiles.isEmpty)
+                                ? TextAlignVertical.center
+                                : TextAlignVertical.top,
                             scrollPhysics:
                                 const AlwaysScrollableScrollPhysics(),
                             onChanged:
@@ -18570,7 +19277,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                               ),
                               border: InputBorder.none,
                               contentPadding: EdgeInsets.fromLTRB(
-                                12,
+                                16,
                                 () {
                                   int topPadding = 12;
                                   if (_quotedMessage != null) {
@@ -18586,8 +19293,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                     topPadding += 80;
                                   return topPadding.toDouble();
                                 }(),
+                                44,
                                 12,
-                                50,
                               ),
                             ),
                           ),
@@ -18932,52 +19639,87 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                     ],
                   ),
                 ),
-                // 发送按钮（定位在右下角，只占一行高度）
+                // 表情按钮（输入框内右下角）
                 Positioned(
-                  right: 8,
-                  bottom: 8,
-                  child: ElevatedButton(
-                    onPressed:
-                        (_isSendingMessage ||
-                            _isUploadingImage ||
-                            _isUploadingVideo ||
-                            _isUploadingFile)
-                        ? null
-                        : _sendMessageWithImage,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF4A90E2),
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      minimumSize: const Size(60, 32), // 最小尺寸，控制按钮高度约为一
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 6,
+                  right: 6,
+                  bottom: 4,
+                  child: Builder(
+                    builder: (btnContext) => IconButton(
+                      icon: const Icon(
+                        Icons.emoji_emotions_outlined,
+                        color: Color(0xFF707579),
                       ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(4),
+                      iconSize: 22,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 36,
+                        minHeight: 36,
                       ),
+                      onPressed: () => _showEmojiPicker(btnContext),
                     ),
-                    child:
-                        (_isSendingMessage ||
-                            _isUploadingImage ||
-                            _isUploadingVideo ||
-                            _isUploadingFile)
-                        ? const SizedBox(
-                            width: 13,
-                            height: 13,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                Colors.white,
-                              ),
-                            ),
-                          )
-                        : const Text('发送', style: TextStyle(fontSize: 13)),
                   ),
                 ),
               ],
             ),
           ),
+          const SizedBox(width: 8),
+          // 右侧按钮（Telegram 风格：无内容时显示语音按钮，有内容时显示蓝色圆形发送图标）
+          if (hasContent || isBusy)
+            Material(
+              color: const Color(0xFF3390EC),
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: isBusy ? null : _sendMessageWithImage,
+                child: Container(
+                  width: 42,
+                  height: 42,
+                  alignment: Alignment.center,
+                  child: isBusy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Colors.white,
+                            ),
+                          ),
+                        )
+                      : const Icon(
+                          Icons.send,
+                          color: Colors.white,
+                          size: 20,
+                        ),
+                ),
+              ),
+            )
+          else
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: () {
+                  // 桌面端录音服务为 stub，暂不支持录音
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('桌面端暂不支持语音消息，请在手机端使用'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+                child: Container(
+                  width: 42,
+                  height: 42,
+                  alignment: Alignment.center,
+                  child: const Icon(
+                    Icons.mic_none,
+                    color: Color(0xFF707579),
+                    size: 24,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

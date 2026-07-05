@@ -6802,20 +6802,23 @@ class _MobileChatListPageState extends State<MobileChatListPage>
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                 // 左侧头像（Telegram 风格：54px 渐变字母头像）
                 _buildTelegramAvatar(contact),
-                const SizedBox(width: 12),
-                // 中间内容
+                const SizedBox(width: 10),
+                // 中间内容（Telegram 风格：文字块按内容自然高度紧凑排列，
+                // 名称与消息贴紧，整块与头像垂直居中）
                 Expanded(
                   child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       // 名称和时间
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
                           Expanded(
                             child: Row(
@@ -6871,8 +6874,8 @@ class _MobileChatListPageState extends State<MobileChatListPage>
                           ),
                         ],
                       ),
-                      const SizedBox(height: 3),
-                      // 最后消息
+                      const SizedBox(height: 2),
+                      // 最后消息（名称下方紧贴一行，右侧未读徽标）
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
@@ -6889,7 +6892,7 @@ class _MobileChatListPageState extends State<MobileChatListPage>
                                     ? FontStyle.italic
                                     : FontStyle.normal,
                               ),
-                              maxLines: 2,
+                              maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
@@ -6904,7 +6907,7 @@ class _MobileChatListPageState extends State<MobileChatListPage>
             ),
           ),
           Padding(
-            padding: const EdgeInsets.only(left: 78),
+            padding: const EdgeInsets.only(left: 76),
             child: Container(height: 0.5, color: c.divider),
           ),
             ],

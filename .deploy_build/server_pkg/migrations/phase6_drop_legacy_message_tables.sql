@@ -1,0 +1,70 @@
+-- 阶段6：删除已迁移到 Agora Chat 的旧消息数据表
+--
+-- ✅✅ 已于 2026-06-28 执行完毕。messages / group_messages / group_message_reads 三张表已 DROP。
+--    删除前行数：messages=1826, group_messages=872, group_message_reads=81。
+--    CASCADE 仅级联删除了 favorites_message_id_fkey（favorites 表与数据保留）。
+--    预删备份：server/backups/youdu_db_message_tables_predrop_20260628_120334.sql
+--    本文件保留作为迁移记录；底部 DROP 语句请勿再次执行。
+--
+-- 背景：用户的 1对1/群聊【聊天消息】已全部迁移到 Agora Chat，后端不再承载其收发/历史。
+--
+-- ✅ 写入方（WRITERS）——已全部迁移，这三张表不再有任何活跃写入：
+--   messages：
+--     · 通话状态消息（call_rejected/cancelled/ended/busy）——客户端 WebSocketService.sendMessage/
+--       sendGroupMessage 已改道 Agora（step 2）。
+--     · 定时消息（services/scheduled_message_service.go）——改为 Agora Chat REST 代发（SendUserText）。
+--     · 好友审核系统消息（controllers/contact_controller.go）——改为 Agora Chat REST 代发。
+--   group_messages：
+--     · 群系统通知（建群/加人/移除/禁言/入群）——group_controller.go 改为内存构造 + WS 广播（step 2）。
+--     · 群通话发起/加入按钮（call_controller.go sendSystemMessageToGroup）——改为内存构造 + WS 广播，
+--       按钮删除用内存合成ID（removeJoinCallButtonMessage），不再写表。
+--     · 定时群消息——改为 Agora Chat REST 代发（SendGroupText）。
+--   group_message_reads：
+--     · 已读记录——客户端 markMessagesAsRead/markGroupMessagesAsRead 已改道 Agora 会话已读回执
+--       （MessageService._syncMark*ToServer → AgoraChatService.markConversationAllRead/sendConversationReadAck），
+--       不再调用 /api/messages/mark-read|mark-group-read|mark-all-read。
+--
+-- ✅ HTTP/同步读取方——已全部拆除：客户端旧同步层 5 个文件已删除；
+--    mobile_chat_page 重连同步、app_initialization 首装历史回填已移除；
+--    后端死的 message/group HTTP+WS handler（GetMessageHistory/GetConversations/GetRecentContacts/
+--    GetMessagesByIds/Mark*AsRead/RecallMessage/DeleteMessage/BatchDeleteMessages/handleSendMessage/
+--    handleSendGroupMessage/saveMessage/handleMessageRecall*/CreateGroupMessage(HTTP+repo)/
+--    GetGroupMessages(HTTP+repo)/GetGroupMessagesByIds 等，约 2900 行）已删除，对应路由已删。
+--
+-- ✅ 活跃读写方（原 5 个 DROP 阻塞项）—— 已全部迁移/改造，这三张表不再有任何活跃读写：
+--   1) 离线消息投递：已删除 message_controller.go sendOfflineMessages / sendOfflineGroupMessages /
+--      markPrivateMessagesSynced / ensurePrivateMessageSyncedTableExists，并移除 HandleWebSocket 中
+--      的 `go sendOfflineMessages` 调用。离线投递改由 Agora Chat 自带能力承担。
+--   2) 已读回执：已删除 handleReadReceipt / markMessageAsRead 及 "read_receipt" 分发分支；客户端
+--      mobile_chat_page 改为 AgoraChatService.sendConversationReadAck（对端 onMessagesRead 接收）。
+--   3) 群通话结束：handleGroupCallEndedSignal 不再 UPDATE group_messages，改调
+--      CallController.removeJoinCallButtonMessage（内存合成ID + 广播 delete_message）；已删除
+--      updateJoinCallButtonToSystemMessage。
+--   4) 联系人搜索：models/contact.go SearchContacts 已移除 last_messages CTE 与对 messages 的 JOIN，
+--      last_message 返回空串（会话最近消息预览由客户端从 Agora 会话生成）。
+--   5) 收藏：已删除 favorite_controller.go CreateFavorite / CreateBatchFavorite（按 message_id 读表）
+--      及对应路由 POST /favorites、POST /favorites/batch；客户端统一走 POST /favorites/direct
+--      （CreateDirectFavorite，直接上传内容快照），favorites 表本身保留。
+--
+-- 备注：private_message_synced【同步记账表】（非本脚本三张表）已于 2026-06-28 一并 DROP
+--   （备份 server/backups/private_message_synced_predrop_20260628_120833.sql；group_message_synced 从未创建）；
+--   后端 ClearSyncedRecords + 路由 /api/messages/clear-synced（整个 /messages 路由组）及客户端
+--   ApiService.clearSyncedRecords 与 3 处调用（main/login/account_switch）均已删除。
+--
+-- 删除前置条件：
+--   1) ✅ 写入方已全部迁移。
+--   2) ✅ 死代码读取方已删除。
+--   3) ✅ 5 个活跃读写方已全部迁移/改造（go build ./controllers/... 等通过，flutter analyze 无新增错误）。
+--   4) ⬜ 联机冒烟验证（三端互测：收发/历史/已读/群通话按钮/搜索/收藏）后再执行本脚本。 ← 当前唯一剩余前置
+--
+-- 备份（已生成，删除前请再次确认）：
+--   server/backups/youdu_db_full_backup_*.sql（全库）
+--   server/backups/youdu_db_message_tables_*.sql（仅这三张表，便于单独恢复）
+--
+-- 满足前置条件后，取消下面的注释执行：
+--
+-- BEGIN;
+-- DROP TABLE IF EXISTS group_message_reads CASCADE;
+-- DROP TABLE IF EXISTS group_messages CASCADE;
+-- DROP TABLE IF EXISTS messages CASCADE;
+-- COMMIT;
