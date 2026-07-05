@@ -23,7 +23,7 @@ class AppLocalizations {
     // 简体中文
     'zh_CN': {
       // 登录页面
-      'app_title': '有度',
+      'app_title': 'Telegram',
       'login': '登录',
       'register': '注册',
       'forgot_password': '忘记密码',
@@ -32,6 +32,7 @@ class AppLocalizations {
       'username': '用户名',
       'password': '密码',
       'account': '账号',
+      'login_subtitle': '请输入您的用户名和密码',
       'account_login': '账号登录',
       'verify_code_login': '验证码登录',
       'phone_number': '手机号',
@@ -99,12 +100,12 @@ class AppLocalizations {
       'press_shortcut_key': '请按下快捷键...',
 
       // 关于页面
-      'app_version': '有度2025-release',
+      'app_version': 'Telegram2025-release',
       'version_number': '版本号：',
       'version_value': '10.0.12-2025102401',
       'copy': '复制',
       'check_update': '检查新版本',
-      'copyright': 'Copyright (c) 2014-2025 有度.com All rights reserved',
+      'copyright': 'Copyright (c) 2014-2025 xbdchat.cc All rights reserved',
 
       // 语言选项
       'chinese_simplified': '简体中文',
@@ -152,6 +153,7 @@ class AppLocalizations {
 
       // 群组和联系人
       'create_group': '创建群组',
+      'add_contact': '添加联系人',
       'group_name': '群组名称',
       'group_members': '群组成员',
       'add_member': '添加成员',
@@ -201,7 +203,7 @@ class AppLocalizations {
       'status': '状态',
       'customer_service': '客服与帮助',
       'switch_account': '切换账号',
-      'exit_youdu': '退出有度',
+      'exit_telegram': '退出Telegram',
       'edit_work_signature': '编辑工作签名',
       'work_signature_hint': '请输入工作签名',
       'work_signature_updated': '工作签名更新成功',
@@ -209,7 +211,7 @@ class AppLocalizations {
       'please_login_first': '请先登录',
       'status_updated': '状态已更新',
       'update_status_failed': '更新状态失败',
-      'exit_youdu_title': '退出有道',
+      'exit_telegram_title': '退出Telegram',
       'confirm_logout': '确定要退出登录吗',
 
       // 升级模块
@@ -239,7 +241,7 @@ class AppLocalizations {
     // 英文
     'en_US': {
       // 登录页面
-      'app_title': '有度',
+      'app_title': 'Telegram',
       'login': 'Login',
       'register': 'Register',
       'forgot_password': 'Forgot Password',
@@ -248,6 +250,7 @@ class AppLocalizations {
       'username': 'Username',
       'password': 'Password',
       'account': 'Account',
+      'login_subtitle': 'Please enter your username and password.',
       'account_login': 'Account Login',
       'verify_code_login': 'Verification Code Login',
       'phone_number': 'Phone Number',
@@ -315,12 +318,12 @@ class AppLocalizations {
       'press_shortcut_key': 'Press shortcut key...',
 
       // 关于页面
-      'app_version': 'Youdu 2025-release',
+      'app_version': 'Telegram 2025-release',
       'version_number': 'Version: ',
       'version_value': '10.0.12-2025102401',
       'copy': 'Copy',
       'check_update': 'Check for Updates',
-      'copyright': 'Copyright (c) 2014-2025 有度.com All rights reserved',
+      'copyright': 'Copyright (c) 2014-2025 xbdchat.cc All rights reserved',
 
       // 语言选项
       'chinese_simplified': '简体中文',
@@ -368,6 +371,7 @@ class AppLocalizations {
 
       // 群组和联系人
       'create_group': 'Create Group',
+      'add_contact': 'Add Contact',
       'group_name': 'Group Name',
       'group_members': 'Group Members',
       'add_member': 'Add Member',
@@ -417,7 +421,7 @@ class AppLocalizations {
       'status': 'Status',
       'customer_service': 'Customer Service & Help',
       'switch_account': 'Switch Account',
-      'exit_youdu': 'Exit Youdu',
+      'exit_telegram': 'Exit Telegram',
       'edit_work_signature': 'Edit Work Signature',
       'work_signature_hint': 'Enter your work signature',
       'work_signature_updated': 'Work signature updated successfully',
@@ -425,7 +429,7 @@ class AppLocalizations {
       'please_login_first': 'Please login first',
       'status_updated': 'Status updated',
       'update_status_failed': 'Failed to update status',
-      'exit_youdu_title': 'Exit Youdu',
+      'exit_telegram_title': 'Exit Telegram',
       'confirm_logout': 'Are you sure you want to logout?',
 
       // Update module
@@ -455,7 +459,7 @@ class AppLocalizations {
     // 繁体中文
     'zh_TW': {
       // 登录页面
-      'app_title': '有度',
+      'app_title': 'Telegram',
       'login': '登錄',
       'register': '註冊',
       'forgot_password': '忘記密碼',
@@ -464,6 +468,7 @@ class AppLocalizations {
       'username': '用戶名',
       'password': '密碼',
       'account': '賬號',
+      'login_subtitle': '請輸入您的使用者名稱和密碼',
       'account_login': '賬號登錄',
       'verify_code_login': '驗證碼登錄',
       'phone_number': '手機號',
@@ -531,12 +536,12 @@ class AppLocalizations {
       'press_shortcut_key': '請按下快捷鍵...',
 
       // 關於頁面
-      'app_version': '有度2025-release',
+      'app_version': 'Telegram2025-release',
       'version_number': '版本號：',
       'version_value': '10.0.12-2025102401',
       'copy': '複製',
       'check_update': '檢查新版本',
-      'copyright': 'Copyright (c) 2014-2025 有度.com All rights reserved',
+      'copyright': 'Copyright (c) 2014-2025 xbdchat.cc All rights reserved',
 
       // 语言选项
       'chinese_simplified': '简体中文',
@@ -584,6 +589,7 @@ class AppLocalizations {
 
       // 群组和联系人
       'create_group': '創建群組',
+      'add_contact': '添加聯繫人',
       'group_name': '群組名稱',
       'group_members': '群組成員',
       'add_member': '添加成員',
@@ -633,7 +639,7 @@ class AppLocalizations {
       'status': '狀態',
       'customer_service': '客服與幫助',
       'switch_account': '切換賬號',
-      'exit_youdu': '退出有度',
+      'exit_telegram': '退出Telegram',
       'edit_work_signature': '編輯工作簽名',
       'work_signature_hint': '請輸入工作簽名',
       'work_signature_updated': '工作簽名更新成功',
@@ -641,7 +647,7 @@ class AppLocalizations {
       'please_login_first': '請先登錄',
       'status_updated': '狀態已更新',
       'update_status_failed': '更新狀態失敗',
-      'exit_youdu_title': '退出有道',
+      'exit_telegram_title': '退出Telegram',
       'confirm_logout': '確定要退出登錄嗎',
 
       // 升級模組

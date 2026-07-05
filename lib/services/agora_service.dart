@@ -12,6 +12,7 @@ import 'dart:async';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'api_service.dart';
 import 'websocket_service.dart';
+import 'agora_chat_service.dart';
 import '../config/agora_config.dart';
 import '../utils/logger.dart';
 import '../utils/storage.dart';
@@ -33,6 +34,11 @@ class AgoraService {
   final WebSocketService _wsService = WebSocketService();
   bool _initialized = false;
   bool _joined = false;
+
+  // 通话信令 CMD 订阅（Agora Chat 长连接，替代 WS onWebRTCSignal；双通道并行期两者并存）
+  StreamSubscription<Map<String, dynamic>>? _callSignalSub;
+  // 信令去重：同一通话的同一信令在 WS + CMD 双通道下会各来一次，按 key 去重
+  final Map<String, DateTime> _recentSignalKeys = {};
 
   // ===== 通话状态 =====
   CallState _callState = CallState.idle;
@@ -131,6 +137,8 @@ class AgoraService {
   bool get isLocalHangup => _isLocalHangup;
   String? get currentChannelName => _currentChannelName;
   String? get currentToken => _currentToken;
+  // 🔴 来电响铃中（尚未接听）时的频道名，供原生来电弹窗等使用
+  String? get pendingChannelName => _pendingChannelName;
   bool get isInGroupCall => _isGroupCall;
 
   // ====================== 初始化 ======================
@@ -163,6 +171,12 @@ class AgoraService {
 
     // 注册（或刷新）WebSocket 信令处理
     _wsService.onWebRTCSignal = _handleWebRTCSignal;
+
+    // 同时订阅 Agora Chat 长连接上的通话信令（CMD）——双通道并行，最终替代 WS。
+    // 先取消旧订阅避免重复；两路都进 _handleWebRTCSignal，由内部 key 去重。
+    _callSignalSub?.cancel();
+    _callSignalSub =
+        AgoraChatService().callSignalStream.listen(_handleWebRTCSignal);
   }
 
   void _registerEngineHandlers() {
@@ -235,6 +249,11 @@ class AgoraService {
 
   void _handleWebRTCSignal(Map<String, dynamic> data) async {
     final type = data['type']?.toString();
+    // 双通道去重：WS 与 CMD 可能各投递一份相同信令，按 (type+频道+主叫+群) 去重
+    if (_isDuplicateSignal(data, type)) {
+      logger.debug('📞 [Agora] 重复信令已忽略: $type');
+      return;
+    }
     logger.debug('📞 [Agora] 收到信令: $type');
     switch (type) {
       case 'incoming_call':
@@ -248,6 +267,13 @@ class AgoraService {
         break;
       case 'call_ended':
       case 'call-ended':
+        // 被叫还在响铃时收到结束信令 = 主叫已取消：
+        // 走取消回调（UI 层关来电弹窗/停铃声/关原生弹窗，不发消息——消息由主叫方发送）
+        if (!_isGroupCall &&
+            _callState == CallState.ringing &&
+            _pendingCallerId != null) {
+          onCallCancelled?.call(_pendingCallerId!, _callType, false);
+        }
         _finishCall(isLocalHangup: false);
         break;
       case 'group_call_member_accepted':
@@ -262,6 +288,25 @@ class AgoraService {
       default:
         break;
     }
+  }
+
+  /// 双通道（WS + Agora CMD）信令去重。
+  /// 同一通话的同一类信令只处理一次；key 由 type+频道名+主叫+群ID 组成。
+  /// 15 秒滑动窗口内视为重复；顺带清理过期 key。
+  bool _isDuplicateSignal(Map<String, dynamic> data, String? type) {
+    if (type == null) return false;
+    final key = [
+      type,
+      data['channel_name']?.toString() ?? '',
+      data['caller_id']?.toString() ?? '',
+      data['group_id']?.toString() ?? '',
+    ].join('|');
+    final now = DateTime.now();
+    _recentSignalKeys.removeWhere(
+        (_, t) => now.difference(t) > const Duration(seconds: 15));
+    if (_recentSignalKeys.containsKey(key)) return true;
+    _recentSignalKeys[key] = now;
+    return false;
   }
 
   void _handleIncomingCall(Map<String, dynamic> data) {
@@ -449,6 +494,11 @@ class AgoraService {
         _finishCall(isLocalHangup: true);
         return;
       }
+      // 持久化"XX发起了语音/视频通话"：服务器 WS 广播帧不落库（退出会话重进即丢失），
+      // 由发起方补发一条 Agora 群消息写入历史；在线成员实时展示仍走 WS 帧。
+      if (groupId != null) {
+        _persistGroupCallInitiated(groupId, type);
+      }
       await _joinChannel(channel, agoraToken, uid, type == CallType.video);
       onGroupCallRoomEntered?.call(
           0, userIds, displayNames, type, groupId);
@@ -456,6 +506,49 @@ class AgoraService {
       logger.error('📞 [Agora] 发起群组通话失败: $e');
       onError?.call('发起群组通话失败: $e');
       _finishCall(isLocalHangup: true);
+    }
+  }
+
+  /// 补发"XX发起了语音/视频通话"Agora 群消息（仅持久化用，失败不影响通话）
+  Future<void> _persistGroupCallInitiated(int groupId, CallType type) async {
+    try {
+      final name = (await Storage.getFullName()) ??
+          (await Storage.getUsername()) ??
+          '';
+      await AgoraChatService().sendGroupCallInitiatedMessage(
+        localGroupId: groupId,
+        isVideo: type == CallType.video,
+        senderName: name,
+      );
+    } catch (e) {
+      logger.error('📞 [Agora] 持久化通话发起消息失败: $e');
+    }
+  }
+
+  /// 若本次离开导致群通话结束（LeaveGroupCall 响应带 is_call_ended + end_message），
+  /// 补发一条 Agora 群消息持久化"通话时长/发起人已取消"——
+  /// 服务器的 WS 广播帧不落库，不补发则退出会话重进后该消息丢失
+  Future<void> _persistGroupCallEndedIfNeeded(Map<String, dynamic> resp) async {
+    try {
+      final groupId = _currentGroupId;
+      if (groupId == null) return;
+      final data = resp['data'] is Map
+          ? Map<String, dynamic>.from(resp['data'] as Map)
+          : resp;
+      if (data['is_call_ended'] != true) return;
+      final content = data['end_message']?.toString() ?? '';
+      if (content.isEmpty) return;
+      final name =
+          (await Storage.getFullName()) ?? (await Storage.getUsername()) ?? '';
+      await AgoraChatService().sendGroupCallEndedMessage(
+        localGroupId: groupId,
+        content: content,
+        isVideo: data['end_message_type']?.toString() == 'call_ended_video',
+        senderName: name,
+      );
+      logger.debug('📞 [Agora] 已持久化群通话结束消息: "$content"');
+    } catch (e) {
+      logger.error('📞 [Agora] 持久化群通话结束消息失败: $e');
     }
   }
 
@@ -570,17 +663,27 @@ class AgoraService {
 
   Future<void> endCall({bool isLocalHangup = true}) async {
     _isLocalHangup = isLocalHangup;
+    // 主叫在接通前挂断 = 取消呼叫（区别于通话结束/被叫拒绝）：
+    // _pendingCallerId 只有被叫收到来电时才会赋值，为 null 即本端是主叫
+    final isCancelling = isLocalHangup &&
+        !_isGroupCall &&
+        _callState != CallState.connected &&
+        _pendingCallerId == null &&
+        _currentCallUserId != null;
+    final cancelTargetId = _currentCallUserId;
+    final cancelType = _callType;
     try {
       final token = await Storage.getToken();
       final channel = _currentChannelName ?? _pendingChannelName;
       if (token != null && channel != null) {
         if (_isGroupCall) {
-          await ApiService.leaveGroupCall(
+          final resp = await ApiService.leaveGroupCall(
             token: token,
             channelName: channel,
             groupId: _currentGroupId,
             callType: _callType == CallType.video ? 'video' : 'voice',
           );
+          await _persistGroupCallEndedIfNeeded(resp);
         } else if (_currentCallUserId != null) {
           await ApiService.endCall(
               token: token, channelName: channel, peerId: _currentCallUserId!);
@@ -588,6 +691,10 @@ class AgoraService {
       }
     } catch (e) {
       logger.debug('📞 [Agora] 结束通话(REST)失败: $e');
+    }
+    // 取消呼叫：通知 UI 层发送"已取消"消息（对方对话框显示"对方已取消"）
+    if (isCancelling && cancelTargetId != null) {
+      onCallCancelled?.call(cancelTargetId, cancelType, true);
     }
     _finishCall(isLocalHangup: isLocalHangup);
   }
@@ -609,6 +716,7 @@ class AgoraService {
         final duration = _callStartTime == null
             ? 0
             : DateTime.now().difference(_callStartTime!).inSeconds;
+        await _persistGroupCallEndedIfNeeded(resp);
         _finishCall(isLocalHangup: true);
         return {'callDuration': duration, 'isCallEnded': isEnded};
       }

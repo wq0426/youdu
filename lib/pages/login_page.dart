@@ -3,15 +3,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'forgot_password_page.dart';
 import 'register_page.dart';
-import 'package:youdu/services/api_service.dart';
-import 'package:youdu/services/websocket_service.dart';
-import 'package:youdu/services/auth_state_service.dart';
-import 'package:youdu/utils/storage.dart';
-import 'package:youdu/utils/app_localizations.dart';
+import 'package:telegram/services/api_service.dart';
+import 'package:telegram/services/websocket_service.dart';
+import 'package:telegram/services/auth_state_service.dart';
+import 'package:telegram/utils/storage.dart';
+import 'package:telegram/utils/app_localizations.dart';
 import '../utils/logger.dart';
+import '../services/theme_service.dart';
 import 'mobile_chat_page.dart';
 import 'mobile_contacts_page.dart';
 import 'mobile_home_page.dart';
+import '../theme/app_theme.dart';
 
 class LoginPage extends StatefulWidget {
   final bool clearCredentials; // 是否清空保存的账号密码
@@ -38,13 +40,13 @@ class _LoginPageState extends State<LoginPage> {
   bool get _isDesktop => Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
   // 统一的标签样式
-  static const TextStyle _labelStyle = TextStyle(
-    fontSize: 14,
-    color: Color(0xFF333333),
-    fontWeight: FontWeight.w500,
-    height: 1.0,
-    letterSpacing: 0,
-  );
+  TextStyle _labelStyle(BuildContext context) => TextStyle(
+        fontSize: 14,
+        color: AppColors.of(context).primaryText,
+        fontWeight: FontWeight.w500,
+        height: 1.0,
+        letterSpacing: 0,
+      );
 
   @override
   void initState() {
@@ -236,18 +238,7 @@ class _LoginPageState extends State<LoginPage> {
         // 注意：用户状态已在后端登录接口中自动设置为 online，无需前端再次设置
         logger.debug('✅ 用户登录成功，状态: ${user['status']}');
 
-        // 🔴 登录成功后清除服务器端的消息同步记录（确保重新安装后能收到所有离线消息）
-        logger.info('🗑️ 清除服务器端消息同步记录...');
-        try {
-          final clearResult = await ApiService.clearSyncedRecords(token: token);
-          if (clearResult['code'] == 0) {
-            logger.info('✅ 服务器端消息同步记录已清除');
-          } else {
-            logger.debug('⚠️ 清除服务器端消息同步记录失败: ${clearResult['message']}');
-          }
-        } catch (e) {
-          logger.debug('⚠️ 清除服务器端消息同步记录异常: $e');
-        }
+        // 🔵 阶段6：离线消息改由 Agora Chat 投递，不再清除后端同步记账记录。
 
         // 🔴 登录成功后清除所有本地缓存
         logger.info('🗑️ 账号密码登录成功，开始清除所有本地缓存...');
@@ -363,19 +354,271 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        width: double.infinity,
-        height: double.infinity,
-        decoration: const BoxDecoration(
-          image: DecorationImage(
-            image: AssetImage('assets/登录/背景图.png'),
-            fit: BoxFit.cover,
+  /// 切换 亮色 / 暗黑 模式
+  void _toggleTheme() {
+    final isDark = ThemeService.instance.isDark(context);
+    ThemeService.instance.toggle(currentlyDark: isDark);
+  }
+
+  /// 右上角 暗黑/浅色 切换按钮（与引导页一致）
+  Widget _buildThemeToggleButton() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topRight,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(0, 8, 8, 0),
+          child: IconButton(
+            tooltip: isDark ? '切换到浅色模式' : '切换到暗黑模式',
+            onPressed: _toggleTheme,
+            icon: Icon(
+              isDark ? Icons.wb_sunny_outlined : Icons.nightlight_round,
+              color: const Color(0xFF54A9EB),
+              size: 26,
+            ),
           ),
         ),
-        child: Center(child: _buildLoginForm()),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 移动端：Telegram 风格登录页（用户名/密码）
+    if (!_isDesktop) {
+      return _buildMobileLayout();
+    }
+    // 桌面端：保留原白卡片登录布局
+    return Scaffold(
+      body: Stack(
+        children: [
+          Container(
+            width: double.infinity,
+            height: double.infinity,
+            decoration: const BoxDecoration(
+              image: DecorationImage(
+                image: AssetImage('assets/登录/背景图.png'),
+                fit: BoxFit.cover,
+              ),
+            ),
+            child: Center(child: _buildLoginForm()),
+          ),
+          // 右上角主题切换按钮
+          Positioned(
+            top: 0,
+            right: 0,
+            child: _buildThemeToggleButton(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 移动端 Telegram 风格登录布局
+  Widget _buildMobileLayout() {
+    final l10n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
+    const primaryBlue = Color(0xFF54A9EB);
+    return Scaffold(
+      backgroundColor: c.scaffold,
+      resizeToAvoidBottomInset: true,
+      body: Stack(
+        children: [
+          SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: MediaQuery.of(context).size.height -
+                  MediaQuery.of(context).padding.vertical,
+            ),
+            child: IntrinsicHeight(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const SizedBox(height: 80),
+                  // 标题
+                  Text(
+                    l10n.translate('login'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w600,
+                      color: c.primaryText,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // 副标题
+                  Text(
+                    l10n.translate('login_subtitle'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 15,
+                      height: 1.4,
+                      color: c.secondaryText,
+                    ),
+                  ),
+                  const SizedBox(height: 44),
+                  // 用户名输入框
+                  TextField(
+                    controller: _accountController,
+                    textInputAction: TextInputAction.next,
+                    decoration: InputDecoration(
+                      labelText: l10n.translate('account'),
+                      floatingLabelBehavior: FloatingLabelBehavior.always,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 18,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: c.divider),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide:
+                            const BorderSide(color: primaryBlue, width: 2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  // 密码输入框
+                  TextField(
+                    controller: _passwordController,
+                    obscureText: _obscurePassword,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) {
+                      if (_canLogin && !_isLoading) _handleAccountLogin();
+                    },
+                    decoration: InputDecoration(
+                      labelText: l10n.translate('password'),
+                      floatingLabelBehavior: FloatingLabelBehavior.always,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 18,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: c.divider),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide:
+                            const BorderSide(color: primaryBlue, width: 2),
+                      ),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                          color: c.secondaryText,
+                          size: 22,
+                        ),
+                        onPressed: () {
+                          setState(() => _obscurePassword = !_obscurePassword);
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  // 悬浮箭头按钮（登录）
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: _buildMobileSubmitButton(primaryBlue),
+                  ),
+                  const Spacer(),
+                  // 忘记密码 & 注册
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 24),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        TextButton(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) => const ForgotPasswordPage(),
+                              ),
+                            );
+                          },
+                          child: Text(
+                            l10n.translate('forgot_password_question'),
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: c.secondaryText,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        TextButton(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) => const RegisterPage(),
+                              ),
+                            );
+                          },
+                          child: Text(
+                            l10n.translate('go_to_register'),
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: primaryBlue,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+          // 右上角主题切换按钮
+          Positioned(
+            top: 0,
+            right: 0,
+            child: _buildThemeToggleButton(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 移动端登录圆形提交按钮
+  Widget _buildMobileSubmitButton(Color primaryBlue) {
+    final bool enabled = _canLogin && !_isLoading;
+    return Material(
+      color: enabled ? primaryBlue : const Color(0xFFCCCCCC),
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: enabled ? _handleAccountLogin : null,
+        child: SizedBox(
+          width: 64,
+          height: 64,
+          child: _isLoading
+              ? const Padding(
+                  padding: EdgeInsets.all(20),
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2.5,
+                  ),
+                )
+              : const Icon(
+                  Icons.arrow_forward,
+                  color: Colors.white,
+                  size: 28,
+                ),
+        ),
       ),
     );
   }
@@ -386,7 +629,7 @@ class _LoginPageState extends State<LoginPage> {
       height: 580,
       margin: const EdgeInsets.symmetric(horizontal: 30),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: AppColors.of(context).surface,
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
@@ -414,10 +657,26 @@ class _LoginPageState extends State<LoginPage> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  SvgPicture.asset(
-                    'assets/登录/登录顶部图片.svg',
-                    width: 120,
-                    height: 32,
+                  Row(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.asset(
+                          'assets/logo/app_icon.png',
+                          width: 32,
+                          height: 32,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      const Text(
+                        'Telegram',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF2AABEE),
+                        ),
+                      ),
+                    ],
                   ),
                   _buildLanguageDropdown(),
                 ],
@@ -477,12 +736,12 @@ class _LoginPageState extends State<LoginPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: _labelStyle),
+        Text(label, style: _labelStyle(context)),
         const SizedBox(height: 8),
         Container(
           height: 42,
           decoration: BoxDecoration(
-            color: const Color(0xFFF5F5F5),
+            color: AppColors.of(context).inputField,
             borderRadius: BorderRadius.circular(4),
           ),
           child: TextField(
@@ -490,8 +749,8 @@ class _LoginPageState extends State<LoginPage> {
             textAlignVertical: TextAlignVertical.center,
             decoration: InputDecoration(
               hintText: hintText,
-              hintStyle: const TextStyle(
-                color: Color(0xFFCCCCCC),
+              hintStyle: TextStyle(
+                color: AppColors.of(context).secondaryText,
                 fontSize: 14,
               ),
               border: InputBorder.none,
@@ -512,12 +771,12 @@ class _LoginPageState extends State<LoginPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(l10n.translate('password'), style: _labelStyle),
+        Text(l10n.translate('password'), style: _labelStyle(context)),
         const SizedBox(height: 8),
         Container(
           height: 42,
           decoration: BoxDecoration(
-            color: const Color(0xFFF5F5F5),
+            color: AppColors.of(context).inputField,
             borderRadius: BorderRadius.circular(4),
           ),
           child: TextField(
@@ -532,8 +791,8 @@ class _LoginPageState extends State<LoginPage> {
             },
             decoration: InputDecoration(
               hintText: l10n.translate('password'),
-              hintStyle: const TextStyle(
-                color: Color(0xFFCCCCCC),
+              hintStyle: TextStyle(
+                color: AppColors.of(context).secondaryText,
                 fontSize: 14,
               ),
               border: InputBorder.none,
@@ -545,7 +804,7 @@ class _LoginPageState extends State<LoginPage> {
               suffixIcon: IconButton(
                 icon: Icon(
                   _obscurePassword ? Icons.visibility_off : Icons.visibility,
-                  color: const Color(0xFF999999),
+                  color: AppColors.of(context).secondaryText,
                   size: 20,
                 ),
                 onPressed: () {
@@ -609,9 +868,9 @@ class _LoginPageState extends State<LoginPage> {
           },
           child: Text(
             l10n.translate('remember_password'),
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 14,
-              color: Color(0xFF666666),
+              color: AppColors.of(context).secondaryText,
             ),
           ),
         ),
@@ -650,7 +909,9 @@ class _LoginPageState extends State<LoginPage> {
             l10n.translate('auto_login_next_time'),
             style: TextStyle(
               fontSize: 14,
-              color: _rememberPassword ? const Color(0xFF666666) : const Color(0xFFCCCCCC),
+              color: _rememberPassword
+                  ? AppColors.of(context).secondaryText
+                  : AppColors.of(context).divider,
             ),
           ),
         ),
@@ -678,7 +939,10 @@ class _LoginPageState extends State<LoginPage> {
           ),
           child: Text(
             l10n.translate('forgot_password_question'),
-            style: const TextStyle(fontSize: 13, color: Color(0xFF999999)),
+            style: TextStyle(
+              fontSize: 13,
+              color: AppColors.of(context).secondaryText,
+            ),
           ),
         ),
         const SizedBox(width: 20),
@@ -768,11 +1032,11 @@ class _LoginPageState extends State<LoginPage> {
     return PopupMenuButton<String>(
       offset: const Offset(0, 40),
       tooltip: '',
-      color: Colors.white,
+      color: AppColors.of(context).surface,
       elevation: 2,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(4),
-        side: const BorderSide(color: Color(0xFFEEEEEE), width: 1),
+        side: BorderSide(color: AppColors.of(context).divider, width: 1),
       ),
       padding: EdgeInsets.zero,
       onSelected: (String value) {
@@ -809,12 +1073,15 @@ class _LoginPageState extends State<LoginPage> {
             const SizedBox(width: 6),
             Text(
               _selectedLanguage,
-              style: const TextStyle(fontSize: 14, color: Color(0xFF666666)),
+              style: TextStyle(
+                fontSize: 14,
+                color: AppColors.of(context).secondaryText,
+              ),
             ),
             const SizedBox(width: 4),
-            const Icon(
+            Icon(
               Icons.arrow_drop_down,
-              color: Color(0xFF666666),
+              color: AppColors.of(context).secondaryText,
               size: 20,
             ),
           ],

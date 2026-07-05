@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"youdu-server/config"
-	"youdu-server/utils"
+	"telegram-server/config"
+	"telegram-server/utils"
 )
 
 // TencentIMService 腾讯云 IM 服务

@@ -1,4 +1,4 @@
-name: youdu
+name: telegram
 description: "A new Flutter project."
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 1.2.9+1772377870
@@ -28,6 +28,7 @@ dependencies:
   webview_flutter_web: ^0.2.2+4  # Web 平台 WebView
   webview_flutter_android: ^3.16.0  # Android WebView
   webview_flutter_wkwebview: ^3.13.0  # iOS WebView
+  flutter_inappwebview: ^6.1.5  # 桌面端(macOS/Windows)后台常驻 WebView，承载 Agora Chat Web SDK
   path: ^1.9.0  # 路径操作
   path_provider: ^2.1.1  # 获取应用目录
   intl: ^0.20.2  # 国际化和日期格式化
@@ -68,8 +69,7 @@ dependencies:
   flutter_background_service_android: ^6.2.3  # Android后台服务
   flutter_background_service_ios: ^5.0.1  # iOS后台服务
   # jpush_flutter: ^2.5.1  # 极光推送 - 暂时禁用，等待兼容 AGP 8.x 的版本
-  connectivity_plus: ^6.1.0  # 监听系统网络切换事件
-  internet_connection_checker_plus: ^2.7.0  # 真正检测互联网是否畅通
+  agora_chat_sdk: ^1.3.3  # 声网 Agora Chat 即时通讯 SDK（消息收发，替代自建后端消息体系）
 
 dependency_overrides:
   record_linux: ^1.0.0
@@ -78,15 +78,42 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.1
+
+# 应用图标配置（运行: dart run flutter_launcher_icons 生成各平台图标）
+flutter_launcher_icons:
+  image_path: "assets/logo/app_icon.png"
+  android: true
+  ios: true
+  # iOS 图标不允许透明，且系统会自动加圆角。使用专门生成的满版(full-bleed)源图，
+  # 用图标自身的渐变蓝铺满整个方块，避免出现白色背景边框，观感与安卓端一致。
+  image_path_ios: "assets/logo/app_icon_ios.png"
+  remove_alpha_ios: true
+  background_color_ios: "#38A1DC"
+  web:
+    generate: true
+    image_path: "assets/logo/app_icon.png"
+  windows:
+    generate: true
+    image_path: "assets/logo/app_icon.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/logo/app_icon.png"
+
 flutter:
 
   uses-material-design: true
 
   assets:
+    - assets/images/
+    - assets/logo/
     - assets/登录/
+    - assets/引导/
     - assets/通讯录/
     - assets/消息/emotion/
     - assets/待办/
     - assets/mp3/
+    - assets/agora_chat_web/
     - screenshot/
     - pubspec.yaml

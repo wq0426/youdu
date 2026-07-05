@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:encrypt/encrypt.dart' as encrypt;
 import 'package:http/http.dart' as http;
-import 'package:youdu/config/api_config.dart';
+import 'package:telegram/config/api_config.dart';
 import '../utils/logger.dart';
 import '../utils/storage.dart';
 import 'message_service.dart';
@@ -363,6 +363,45 @@ class ApiService {
   /// - data: { server_name: {...}, server_url: {...}, ... }
   static Future<Map<String, dynamic>> getServerConfig() async {
     return await get(ApiConfig.configServer);
+  }
+
+  // ============ Agora Chat 即时通讯 API ============
+
+  /// 获取当前用户的 Agora Chat 登录信息
+  ///
+  /// 请求参数:
+  /// - token: 登录凭证 (必填)
+  ///
+  /// 返回:
+  /// - code: 0 表示成功
+  /// - data: app_key(org#app) / username(用户ID) / token(chat token) / expire_in_seconds(86400)
+  static Future<Map<String, dynamic>> getChatToken({required String token}) async {
+    return await get(ApiConfig.chatToken, token: token);
+  }
+
+  /// 消息同步归档：接收方收到 Agora 消息后异步上报服务器（管理后台聊天记录展示用）
+  ///
+  /// 请求参数:
+  /// - messages: 消息列表，每条含 is_group/agora_msg_id/sender_id/receiver_id/group_id/
+  ///   content/message_type/created_at_ms 等字段
+  /// - token: 登录凭证 (必填)
+  ///
+  /// 返回:
+  /// - code: 0 表示成功
+  /// - data: { saved: 实际新入库条数, received: 收到条数 }（重复上报靠 agora_msg_id 幂等）
+  static Future<Map<String, dynamic>> syncChatMessages({
+    required List<Map<String, dynamic>> messages,
+    required String token,
+  }) async {
+    return await post(ApiConfig.messageSyncBatch, {'messages': messages}, token: token);
+  }
+
+  /// 消息同步归档：消息被撤回时上报，把归档记录标记为 recalled
+  static Future<Map<String, dynamic>> syncChatRecall({
+    required List<String> agoraMsgIds,
+    required String token,
+  }) async {
+    return await post(ApiConfig.messageSyncRecall, {'agora_msg_ids': agoraMsgIds}, token: token);
   }
 
   /// 获取OSS前缀域名配置
@@ -1263,31 +1302,8 @@ class ApiService {
     }
   }
 
-  /// 清除消息同步记录（用于重新安装后重新同步离线消息）
-  ///
-  /// 请求参数:
-  /// - token: 登录凭证 (必填)
-  ///
-  /// 返回:
-  /// - code: 0 表示成功
-  /// - message: 响应消息
-  /// - data: { message: "清除成功", private_rows_affected: 10, group_rows_affected: 5 }
-  static Future<Map<String, dynamic>> clearSyncedRecords({
-    required String token,
-  }) async {
-    logger.debug('🗑️ 清除消息同步记录（服务器）');
-    try {
-      final response = await post(
-        '/api/messages/clear-synced',
-        {},
-        token: token,
-      );
-      return response;
-    } catch (e) {
-      logger.error('❌ 清除消息同步记录失败: $e');
-      return {'code': -1, 'message': '清除失败: $e', 'data': null};
-    }
-  }
+  // 🔵 阶段6：clearSyncedRecords 已移除——离线投递迁到 Agora Chat，后端 /api/messages/clear-synced
+  // 及 private_message_synced 记账表已下线删除。
 
   // ============ 联系人相关 API ============
 
@@ -2996,16 +3012,9 @@ class ApiService {
     required String senderName,
   }) async {
     try {
-      // 如果有messageId，使用原有的基于消息ID的API
-      if (messageId != null) {
-        return await post(ApiConfig.favorites, {
-          'message_id': messageId,
-        }, token: token);
-      }
-      
-      // 如果没有messageId（如群组消息），使用直接创建的方式
-      // 注意：服务器端的CreateFavorite需要message_id，所以群组消息需要特殊处理
-      // 这里我们使用批量创建API的单条模式
+      // 🔵 阶段6：收藏已迁移到内容快照模式。消息体已全部走 Agora Chat，后端不再保存
+      // messages/group_messages，无法再按 message_id 反查内容。统一改为 /direct 直接上传内容快照。
+      // （messageId 参数仅用于本地数据库记录，不再发给服务器。）
       return await post('${ApiConfig.favorites}/direct', {
         'content': content,
         'message_type': messageType,

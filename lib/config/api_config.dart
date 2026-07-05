@@ -13,23 +13,13 @@ class ApiConfig {
   //   - macOS: 使用 192.168.1.20 (HTTP 8180/8181)
   //   - Windows: 使用 192.168.1.6 (HTTP 8180/8181)
   // Release模式: 
-  //   - 国内: 使用 abc.hb.cn (HTTPS 8280/8281)
-  //   - 海外: 使用 abc.hb.cn (HTTPS 8180/8181)
+  //   - 国内: 使用 xbdchat.cc (HTTPS 8280/8281)
+  //   - 海外: 使用 xbdchat.cc (HTTPS 8180/8181)
   static String get defaultHost {
     if (!kDebugMode) {
-      return 'abc.hb.cn';
+      return 'xbdchat.cc';
     } else {
-      // Debug 模式下连接本地后端
-      // 注意：在 macOS 上编译 iOS 应用时，Platform.isMacOS 为 false，Platform.isIOS 为 true
-      if (Platform.isAndroid) {
-        // Android 模拟器：用 10.0.2.2 访问宿主机（不能用宿主机的局域网IP）
-        // 若是真机：改成宿主机局域网IP，例如 192.168.1.20，且手机与电脑在同一WiFi
-        return '192.168.1.20';
-      } else {
-        // iOS 模拟器 / macOS：与宿主机共享网络，用 127.0.0.1
-        // 若是 iOS 真机：改成宿主机局域网IP，例如 192.168.1.20，且与电脑在同一WiFi
-        return '192.168.1.20';
-      }
+      return '192.168.1.20';
     }
   }
   
@@ -47,7 +37,7 @@ class ApiConfig {
 
   /// 获取当前主机地址
   static String get host => _currentHost;
-  static String get syncHost => useHttps ? '31.57.65.81' : defaultHost;
+  static String get syncHost => host;
 
   /// 获取当前端口
   static String get port => _currentPort;
@@ -114,6 +104,9 @@ class ApiConfig {
   static const String ossCompleteMultipart = '/api/oss/complete_multipart';
   static const String ossGetOpusUploadUrl = '/api/oss/get_opus_upload_url';
   static const String ossPrefixConfig = '/api/oss/prefix-config';
+  static const String chatToken = '/api/chat/token';
+  static const String messageSyncBatch = '/api/message-sync/batch';
+  static const String messageSyncRecall = '/api/message-sync/recall';
   static const String contacts = '/api/contacts';
   static const String messages = '/api/messages';
   static const String messagesRecentContacts = '/api/messages/recent-contacts';

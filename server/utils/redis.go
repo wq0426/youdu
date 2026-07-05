@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"youdu-server/config"
+	"telegram-server/config"
 
 	"github.com/redis/go-redis/v9"
 )

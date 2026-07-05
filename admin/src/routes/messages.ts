@@ -21,6 +21,97 @@ router.get('/groups', async (_req: AuthRequest, res: Response) => {
   res.json({ data: result.rows });
 });
 
+// 通用筛选条件构建（单聊/群聊消息平铺列表共用）
+const buildMsgFilters = (query: any, alias: string) => {
+  const conds: string[] = [];
+  const params: any[] = [];
+  const add = (sql: string, value: any) => {
+    params.push(value);
+    conds.push(sql.replace('?', `$${params.length}`));
+  };
+
+  if (query.keyword) add(`${alias}.content ILIKE ?`, `%${query.keyword}%`);
+  if (query.sender_id) add(`${alias}.sender_id = ?`, parseInt(query.sender_id));
+  if (query.status) add(`${alias}.status = ?`, query.status);
+  if (query.message_type) {
+    // "call" 表示所有通话类消息（call_ended / call_rejected 等）
+    if (query.message_type === 'call') add(`${alias}.message_type LIKE ?`, 'call%');
+    else add(`${alias}.message_type = ?`, query.message_type);
+  }
+  if (query.start_date) add(`${alias}.created_at >= ?`, (query.start_date as string).replace('T', ' '));
+  if (query.end_date) add(`${alias}.created_at <= ?`, (query.end_date as string).replace('T', ' '));
+
+  return { conds, params, add };
+};
+
+const parsePaging = (query: any) => {
+  const page = Math.max(parseInt(query.page) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit) || 20, 1), 200);
+  return { page, limit, offset: (page - 1) * limit };
+};
+
+// 单聊消息列表（平铺所有用户的聊天记录，支持筛选 + 分页）
+router.get('/private', async (req: AuthRequest, res: Response) => {
+  const { page, limit, offset } = parsePaging(req.query);
+  const { conds, params, add } = buildMsgFilters(req.query, 'm');
+
+  if (req.query.receiver_id) add('m.receiver_id = ?', parseInt(req.query.receiver_id as string));
+  // user_id: 该用户参与的所有单聊（发送或接收）
+  if (req.query.user_id) {
+    params.push(parseInt(req.query.user_id as string));
+    conds.push(`(m.sender_id = $${params.length} OR m.receiver_id = $${params.length})`);
+  }
+
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const result = await pool.query(`
+    SELECT m.id, m.sender_id, m.sender_name, m.receiver_id, m.receiver_name,
+           su.username AS sender_username, su.full_name AS sender_fullname,
+           ru.username AS receiver_username, ru.full_name AS receiver_fullname,
+           m.content, m.message_type, m.file_name, m.voice_duration, m.call_type,
+           m.quoted_message_content, m.status, m.is_read, m.created_at
+    FROM synced_messages m
+    LEFT JOIN users su ON su.id = m.sender_id
+    LEFT JOIN users ru ON ru.id = m.receiver_id
+    ${where}
+    ORDER BY m.created_at DESC, m.id DESC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `, [...params, limit, offset]);
+
+  const countResult = await pool.query(`SELECT COUNT(*) FROM synced_messages m ${where}`, params);
+  const total = parseInt(countResult.rows[0].count);
+  res.json({ data: result.rows, total, page, limit, totalPages: Math.ceil(total / limit) });
+});
+
+// 群聊消息列表（平铺所有群组的聊天记录，支持筛选 + 分页）
+router.get('/group-list', async (req: AuthRequest, res: Response) => {
+  const { page, limit, offset } = parsePaging(req.query);
+  const { conds, params } = buildMsgFilters(req.query, 'gm');
+
+  if (req.query.group_id) {
+    params.push(parseInt(req.query.group_id as string));
+    conds.push(`gm.group_id = $${params.length}`);
+  }
+
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const result = await pool.query(`
+    SELECT gm.id, gm.group_id, g.name AS group_name, gm.sender_id, gm.sender_name,
+           gm.sender_full_name, gm.sender_nickname, gm.content, gm.message_type,
+           gm.file_name, gm.voice_duration, gm.call_type, gm.quoted_message_content,
+           gm.status, gm.created_at
+    FROM synced_group_messages gm
+    LEFT JOIN groups g ON g.id = gm.group_id
+    ${where}
+    ORDER BY gm.created_at DESC, gm.id DESC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `, [...params, limit, offset]);
+
+  const countResult = await pool.query(`
+    SELECT COUNT(*) FROM synced_group_messages gm LEFT JOIN groups g ON g.id = gm.group_id ${where}
+  `, params);
+  const total = parseInt(countResult.rows[0].count);
+  res.json({ data: result.rows, total, page, limit, totalPages: Math.ceil(total / limit) });
+});
+
 // 获取所有会话列表
 router.get('/conversations', async (req: AuthRequest, res: Response) => {
   const page = parseInt(req.query.page as string) || 1;

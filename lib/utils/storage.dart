@@ -14,6 +14,8 @@ class Storage {
   // 安全存储实例（用于存储敏感信息）
   static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    // macOS 无开发者证书(ad-hoc 签名)时数据保护钥匙串会报 -34018，改用传统登录钥匙串
+    mOptions: MacOsOptions(useDataProtectionKeyChain: false),
   );
 
   // 🔴 为关键的认证信息添加进程ID前缀，避免多实例冲突
@@ -46,6 +48,7 @@ class Storage {
   static const String _idleStatusEnabledKey = 'idle_status_enabled';
   static const String _idleMinutesKey = 'idle_minutes';
   static const String _appLanguageKey = 'app_language';
+  static const String _themeModeKey = 'app_theme_mode';
   static const String _windowZoomKey = 'window_zoom';
   static const String _newMessageSoundEnabledKey = 'new_message_sound_enabled';
   static const String _newMessagePopupEnabledKey = 'new_message_popup_enabled';
@@ -90,6 +93,19 @@ class Storage {
   static Future<int?> getUserId() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getInt(_userIdKey);
+  }
+
+  /// 🚀 持久化最近会话列表快照（JSON 字符串，按用户隔离）
+  /// 冷启动时先展示上次的列表（秒开），Agora 连上后再后台刷新为权威数据
+  static Future<void> saveRecentContactsSnapshot(int userId, String json) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('recent_contacts_snapshot_$userId', json);
+  }
+
+  /// 🚀 读取最近会话列表快照（无则返回 null）
+  static Future<String?> getRecentContactsSnapshot(int userId) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('recent_contacts_snapshot_$userId');
   }
 
   /// 保存用户名
@@ -348,6 +364,19 @@ class Storage {
   static Future<String> getLanguage() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_appLanguageKey) ?? 'zh_CN'; // 默认简体中文
+  }
+
+  /// 保存主题模式（全局配置，所有实例共享）
+  /// 取值：'light' | 'dark' | 'system'
+  static Future<void> saveThemeMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_themeModeKey, mode);
+  }
+
+  /// 获取主题模式，默认跟随系统
+  static Future<String> getThemeMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_themeModeKey) ?? 'system';
   }
 
   /// 保存OSS前缀域名配置
@@ -1219,6 +1248,20 @@ class Storage {
     }
   }
   
+  /// 从已读状态缓存中移除单个会话（收到新消息使旧的已读状态过期时调用）
+  static Future<void> removeFromReadStatusCache(String sessionKey) async {
+    final userId = await getUserId();
+    if (userId == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final key = _getReadStatusCacheKey(userId);
+    final list = prefs.getStringList(key) ?? [];
+    if (list.remove(sessionKey)) {
+      await prefs.setStringList(key, list);
+      logger.debug('💾 [Storage.removeFromReadStatusCache] 已从Storage移除: $sessionKey (userId: $userId, 剩余: ${list.length}条)');
+    }
+  }
+
   /// 清除已读状态缓存（登录时调用）
   static Future<void> clearReadStatusCache() async {
     final userId = await getUserId();

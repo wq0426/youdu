@@ -15,6 +15,7 @@ class GroupModel {
   final bool inviteConfirmation; // 群聊邀请确认（true表示普通成员添加新成员需要群主/管理员审核）
   final bool doNotDisturb; // 消息免打扰（true表示只显示红点，false表示显示未读数量）
   final List<int> memberIds;
+  final String? agoraGroupId; // Agora Chat 群会话ID（群消息收发以此为会话标识）
   final DateTime createdAt;
   final DateTime? updatedAt;
 
@@ -32,6 +33,7 @@ class GroupModel {
     this.inviteConfirmation = false,
     this.doNotDisturb = false,
     required this.memberIds,
+    this.agoraGroupId,
     required this.createdAt,
     this.updatedAt,
   });
@@ -56,6 +58,7 @@ class GroupModel {
               ?.map((e) => e as int)
               .toList() ??
           [],
+      agoraGroupId: json['agora_group_id'] as String?,
       createdAt: TimezoneHelper.parseToShanghaiTime(json['created_at'] as String),
       updatedAt: json['updated_at'] != null
           ? TimezoneHelper.parseToShanghaiTime(json['updated_at'] as String)
@@ -79,6 +82,7 @@ class GroupModel {
       'invite_confirmation': inviteConfirmation,
       'do_not_disturb': doNotDisturb,
       'member_ids': memberIds,
+      if (agoraGroupId != null) 'agora_group_id': agoraGroupId,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt?.toIso8601String(),
     };
@@ -99,6 +103,7 @@ class GroupModel {
     bool? inviteConfirmation,
     bool? doNotDisturb,
     List<int>? memberIds,
+    String? agoraGroupId,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -116,6 +121,7 @@ class GroupModel {
       inviteConfirmation: inviteConfirmation ?? this.inviteConfirmation,
       doNotDisturb: doNotDisturb ?? this.doNotDisturb,
       memberIds: memberIds ?? this.memberIds,
+      agoraGroupId: agoraGroupId ?? this.agoraGroupId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );

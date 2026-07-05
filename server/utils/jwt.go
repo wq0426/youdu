@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"youdu-server/config"
+	"telegram-server/config"
 )
 
 // Claims JWT声明

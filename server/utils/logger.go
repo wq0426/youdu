@@ -53,7 +53,7 @@ func InitLogger(logDir string) (*os.File, error) {
 	// 生成日志文件名（按日期）
 	now := time.Now()
 	dateStr := now.Format("2006-01-02")
-	logFileName := fmt.Sprintf("youdu-server_%s.log", dateStr)
+	logFileName := fmt.Sprintf("telegram-server_%s.log", dateStr)
 	logFilePath := filepath.Join(logDir, logFileName)
 
 	// 打开日志文件（追加模式）

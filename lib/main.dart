@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:window_manager/window_manager.dart';
 import 'pages/login_page.dart';
+import 'pages/onboarding_page.dart';
 import 'pages/home_page.dart';
 import 'utils/app_localizations.dart';
 import 'utils/storage.dart';
@@ -18,6 +19,8 @@ import 'services/permission_service.dart';
 import 'services/version_persistence_service.dart';
 import 'services/fresh_install_service.dart';
 import 'services/auth_state_service.dart';
+import 'services/theme_service.dart';
+import 'theme/app_theme.dart';
 import 'config/app_version_config.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
@@ -157,6 +160,9 @@ void main() async {
   // 初始化日志系统
   await logger.init();
   logger.info('========== 应用启动 ==========');
+
+  // 🎨 加载主题模式（亮色 / 暗黑 / 跟随系统）
+  await ThemeService.instance.init();
   logger.info('🆔 进程ID: $pid');
   
   // 🔍 调试：输出 API 配置信息
@@ -226,7 +232,7 @@ void main() async {
       await windowManager.setResizable(true);
       await windowManager.setMinimumSize(const Size(800, 600));
       await windowManager.setSize(Size(windowWidth, windowHeight));
-      await windowManager.setTitle('有度'); // 设置窗口标题
+      await windowManager.setTitle('Telegram'); // 设置窗口标题
       await windowManager.center();
       await windowManager.show();
       await windowManager.focus();
@@ -304,42 +310,48 @@ class _MyAppState extends State<MyApp> with WindowListener {
     // Agora 无内置通话 UI，无需导航观察者
     final observers = <NavigatorObserver>[];
 
-    return MaterialApp(
-      title: '有度',
-      debugShowCheckedModeBanner: false,
-      // 🔴 全局导航key，用于在任何地方跳转页面（如token失效时跳转到登录页）
-      navigatorKey: AuthStateService.navigatorKey,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF4A90E2)),
-        useMaterial3: true,
-      ),
-      locale: _locale,
-      localizationsDelegates: const [
-        AppLocalizationsDelegate(),
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales: AppLocalizations.supportedLocales,
-      // 添加导航观察者（仅移动端，用于通话界面导航）
-      navigatorObservers: observers,
-      // 使用 onGenerateRoute 来动态决定初始路由
-      onGenerateRoute: (settings) {
-        // 如果是初始路由，需要检查登录状态和自动登录配置
-        if (settings.name == '/' || settings.name == null) {
-          return _generateInitialRoute();
-        }
-        // 其他路由
-        switch (settings.name) {
-          case '/login':
-            return MaterialPageRoute(builder: (_) => const LoginPage());
-          case '/home':
-            return MaterialPageRoute(builder: (_) => const HomePage());
-          default:
-            return MaterialPageRoute(builder: (_) => const LoginPage());
-        }
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeService.instance.mode,
+      builder: (context, themeMode, _) {
+        return MaterialApp(
+          title: 'Telegram',
+          debugShowCheckedModeBanner: false,
+          // 🔴 全局导航key，用于在任何地方跳转页面（如token失效时跳转到登录页）
+          navigatorKey: AuthStateService.navigatorKey,
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          themeMode: themeMode,
+          locale: _locale,
+          localizationsDelegates: const [
+            AppLocalizationsDelegate(),
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: AppLocalizations.supportedLocales,
+          // 添加导航观察者（仅移动端，用于通话界面导航）
+          navigatorObservers: observers,
+          // 使用 onGenerateRoute 来动态决定初始路由
+          onGenerateRoute: (settings) {
+            // 如果是初始路由，需要检查登录状态和自动登录配置
+            if (settings.name == '/' || settings.name == null) {
+              return _generateInitialRoute();
+            }
+            // 其他路由
+            switch (settings.name) {
+              case '/onboarding':
+                return MaterialPageRoute(builder: (_) => const OnboardingPage());
+              case '/login':
+                return MaterialPageRoute(builder: (_) => const LoginPage());
+              case '/home':
+                return MaterialPageRoute(builder: (_) => const HomePage());
+              default:
+                return MaterialPageRoute(builder: (_) => const LoginPage());
+            }
+          },
+          initialRoute: '/',
+        );
       },
-      initialRoute: '/',
     );
   }
 
@@ -413,25 +425,18 @@ class _InitialRouteCheckerState extends State<_InitialRouteChecker> {
           }
         }
 
-        // 如果有保存的密码但没有勾选自动登录，跳转到登录页面（会自动填充账号密码）
-        final savedPassword = await Storage.getSavedPasswordForLastUser();
-        if (savedPassword != null && savedPassword.isNotEmpty) {
-          if (mounted) {
-            Navigator.of(context).pushReplacementNamed('/login');
-          }
-          return;
-        }
       }
 
-      // 否则，跳转到登录页面
+      // 未自动登录：先进入引导页（图1-6），由"Start Messaging"进入登录页
+      // 登录页会自动填充已保存的账号密码
       if (mounted) {
-        Navigator.of(context).pushReplacementNamed('/login');
+        Navigator.of(context).pushReplacementNamed('/onboarding');
       }
     } catch (e) {
       logger.debug('❌ 检查登录状态失败: $e');
-      // 出错时，默认跳转到登录页面
+      // 出错时，默认跳转到引导页
       if (mounted) {
-        Navigator.of(context).pushReplacementNamed('/login');
+        Navigator.of(context).pushReplacementNamed('/onboarding');
       }
     }
   }
@@ -486,15 +491,7 @@ class _InitialRouteCheckerState extends State<_InitialRouteChecker> {
         // 重新初始化日志系统（使用用户ID）
         await logger.init(userId: user['id'].toString());
 
-        // 🔴 自动登录成功后清除服务器端的消息同步记录（确保重新安装后能收到所有离线消息）
-        try {
-          final clearResult = await ApiService.clearSyncedRecords(token: token);
-          if (clearResult['code'] == 0) {
-            logger.info('✅ 服务器端消息同步记录已清除');
-          }
-        } catch (e) {
-          logger.debug('⚠️ 清除服务器端消息同步记录异常: $e');
-        }
+        // 🔵 阶段6：离线消息改由 Agora Chat 投递，不再清除后端同步记账记录。
 
         // 获取上次保存的页面路径
         final lastRoute = await Storage.getLastPageRoute(user['id']);

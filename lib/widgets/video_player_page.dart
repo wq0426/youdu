@@ -4,7 +4,8 @@ import 'package:video_player/video_player.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:gal/gal.dart';
-import 'package:http/http.dart' as http;
+import 'package:dio/dio.dart';
+import '../services/media_cache_service.dart';
 import '../utils/logger.dart';
 
 class VideoPlayerPage extends StatefulWidget {
@@ -36,13 +37,29 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
   Future<void> _initializeVideo() async {
     try {
-      _controller = VideoPlayerController.networkUrl(
-        Uri.parse(widget.videoUrl),
-        videoPlayerOptions: VideoPlayerOptions(
-          mixWithOthers: false,
-          allowBackgroundPlayback: false,
-        ),
-      );
+      // 📦 优先本地缓存：命中则零流量秒开；
+      // 未命中保持 networkUrl 流式秒开，同时后台分片下载落盘，下次播放即命中。
+      final cachedFile = await MediaCacheService().lookup(widget.videoUrl);
+      if (cachedFile != null) {
+        logger.debug('📦 [视频] 命中本地缓存: ${cachedFile.path}');
+        _controller = VideoPlayerController.file(
+          cachedFile,
+          videoPlayerOptions: VideoPlayerOptions(
+            mixWithOthers: false,
+            allowBackgroundPlayback: false,
+          ),
+        );
+      } else {
+        _controller = VideoPlayerController.networkUrl(
+          Uri.parse(widget.videoUrl),
+          videoPlayerOptions: VideoPlayerOptions(
+            mixWithOthers: false,
+            allowBackgroundPlayback: false,
+          ),
+        );
+        // 后台预取完整文件（串行队列，不抢首播带宽）
+        MediaCacheService().prefetchVideo(widget.videoUrl);
+      }
 
       await _controller.initialize();
 
@@ -191,31 +208,32 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
         ),
       );
 
-      // 下载文件
-      final response = await http.get(Uri.parse(widget.videoUrl));
-      if (response.statusCode != 200) {
-        throw Exception('下载失败');
-      }
-
-      // 获取文件扩展名
-      String extension;
-      final fileName = widget.videoUrl.split('/').last.split('?').first;
-      if (fileName.contains('.')) {
-        extension = fileName.split('.').last.toLowerCase();
+      // 📦 命中本地缓存直接用缓存文件，无需再下载
+      final cachedFile = await MediaCacheService().lookup(widget.videoUrl);
+      if (cachedFile != null) {
+        await Gal.putVideo(cachedFile.path);
       } else {
-        extension = 'mp4';
+        // 获取文件扩展名
+        String extension;
+        final fileName = widget.videoUrl.split('/').last.split('?').first;
+        if (fileName.contains('.')) {
+          extension = fileName.split('.').last.toLowerCase();
+        } else {
+          extension = 'mp4';
+        }
+
+        // 🔴 修复：dio 流式下载直接写盘，避免 http.get 把整个视频读进内存（大视频 OOM）
+        final tempDir = await getTemporaryDirectory();
+        final tempFile = File(
+            '${tempDir.path}/temp_${DateTime.now().millisecondsSinceEpoch}.$extension');
+        await Dio().download(widget.videoUrl, tempFile.path);
+
+        // 使用 Gal 保存到相册
+        await Gal.putVideo(tempFile.path);
+
+        // 删除临时文件
+        await tempFile.delete();
       }
-
-      // 保存到临时文件
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File('${tempDir.path}/temp_${DateTime.now().millisecondsSinceEpoch}.$extension');
-      await tempFile.writeAsBytes(response.bodyBytes);
-
-      // 使用 Gal 保存到相册
-      await Gal.putVideo(tempFile.path);
-
-      // 删除临时文件
-      await tempFile.delete();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

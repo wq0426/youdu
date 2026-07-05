@@ -9,7 +9,7 @@ class NativeCallService {
   factory NativeCallService() => _instance;
   NativeCallService._internal();
 
-  static const MethodChannel _channel = MethodChannel('com.example.youdu/call');
+  static const MethodChannel _channel = MethodChannel('com.example.telegram/call');
 
   /// 初始化来电服务
   /// 设置来电回调监听器

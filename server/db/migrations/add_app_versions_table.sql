@@ -37,5 +37,5 @@ COMMENT ON COLUMN app_versions.is_active IS '是否启用，false时不会推送
 -- 插入示例数据（可选，用于测试）
 -- INSERT INTO app_versions (platform, version, version_code, download_url, release_notes, file_size, md5, force_update, is_active)
 -- VALUES 
---     ('android', '1.0.1', '2', 'https://example.com/youdu_1.0.1.apk', '1. 修复已知问题\n2. 性能优化', 52428800, 'abc123def456', false, true),
---     ('windows', '1.0.1', '2', 'https://example.com/youdu_1.0.1.exe', '1. 修复已知问题\n2. 性能优化', 104857600, 'xyz789abc123', false, true);
+--     ('android', '1.0.1', '2', 'https://example.com/telegram_1.0.1.apk', '1. 修复已知问题\n2. 性能优化', 52428800, 'abc123def456', false, true),
+--     ('windows', '1.0.1', '2', 'https://example.com/telegram_1.0.1.exe', '1. 修复已知问题\n2. 性能优化', 104857600, 'xyz789abc123', false, true);

@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"youdu-server/utils"
+	"telegram-server/utils"
 
 	"github.com/gin-gonic/gin"
 )

@@ -4,13 +4,13 @@ import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart'; // 🔴 添加WebSocket服务
 import '../services/notification_service.dart'; // 🔴 添加通知服务（用于检查前后台状态）
-import '../services/network_manager.dart'; // 🔴 添加网络监听服务
 import '../models/contact_model.dart';
 import '../models/group_model.dart';
 import '../utils/logger.dart';
 import '../utils/app_localizations.dart';
 import '../utils/storage.dart';
 import '../utils/sort_helper.dart';
+import '../theme/app_theme.dart';
 import 'mobile_chat_page.dart';
 import 'mobile_create_group_page.dart';
 import 'mobile_home_page.dart'; // 🔴 新增：导入以访问 MobileChatListPage
@@ -76,10 +76,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
   // 🔴 网络连接状态
   final WebSocketService _wsService = WebSocketService();
   bool _isConnecting = false; // 是否正在连接网络
-  bool _isNetworkConnected = false; // 网络是否已连接
   Timer? _networkStatusTimer; // 网络状态监听定时器（WebSocket连接状态）
-  StreamSubscription<bool>? _networkStatusSubscription; // NetworkManager 网络状态监听订阅
-  Function(bool)? _networkStatusCallback; // 🔴 新增：网络状态回调函数引用（用于dispose时移除）
 
   // 🔴 新增：缓存相关
   static List<ContactModel>? _cachedContacts;
@@ -139,27 +136,16 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
     // 🔴 设置网络状态监听
     _setupNetworkStatusListener();
-    
-    // 🔴 关键修复：立即检测 NetworkManager 的网络状态
-    // 如果网络断开，立即显示"正在刷新..."
-    final isNetworkOnline = NetworkManager().isOnline;
-    if (!isNetworkOnline) {
-      logger.debug('🔴 [ContactsPage-Init] 检测到网络断开，立即显示正在刷新...');
-      setState(() {
-        _isConnecting = true;
-        _isNetworkConnected = false;
-      });
-      // 触发真正的刷新操作
-      _performRealRefresh();
-    } else if (!_wsService.isConnected && NotificationService().isAppInForeground) {
-      // 网络在线但 WebSocket 未连接
-      logger.debug('⚠️ [ContactsPage-Init] 网络在线但 WebSocket 未连接，显示正在刷新并触发重连...');
+
+    // 🔴 连接状态只看 WebSocket 自身：未连接就显示"正在刷新..."并触发重连
+    if (!_wsService.isConnected && NotificationService().isAppInForeground) {
+      logger.debug('⚠️ [ContactsPage-Init] WebSocket 未连接，显示正在刷新并触发重连...');
       setState(() {
         _isConnecting = true;
       });
       _performRealRefresh();
     } else {
-      logger.debug('✅ [ContactsPage-Init] 网络和 WebSocket 连接正常');
+      logger.debug('✅ [ContactsPage-Init] WebSocket 连接正常');
     }
   }
 
@@ -297,17 +283,15 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     _cachedApiVersion = _apiVersion; // 同时更新API版本号
   }
 
-  // 🔴 设置网络状态监听
+  // 🔴 设置网络状态监听（只看 WebSocket 自身连接状态）
   void _setupNetworkStatusListener() {
-    // 取消之前的定时器和订阅（如果存在）
+    // 取消之前的定时器（如果存在）
     _networkStatusTimer?.cancel();
-    _networkStatusSubscription?.cancel();
-    
-    // 初始化网络连接状态
-    _isNetworkConnected = _wsService.isConnected;
-    _isConnecting = !_isNetworkConnected; // 初始状态：断网就显示刷新
-    
-    // 🔴 保留原有的 WebSocket 连接状态监听（定时器方式）
+
+    // 初始化连接状态
+    _isConnecting = !_wsService.isConnected; // 初始状态：断网就显示刷新
+
+    // 🔴 WebSocket 连接状态监听（定时器方式）
     _networkStatusTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       if (!mounted) {
         timer.cancel();
@@ -327,9 +311,8 @@ class _MobileContactsPageState extends State<MobileContactsPage>
       if (shouldShowRefreshing != _isConnecting) {
         setState(() {
           _isConnecting = shouldShowRefreshing;
-          _isNetworkConnected = currentConnected;
         });
-        
+
         if (shouldShowRefreshing) {
           logger.debug('🔄 [网络状态-通讯录] 网络断开，显示正在刷新...');
         } else {
@@ -339,85 +322,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
         }
       }
     });
-    
-    // 🔴 移除之前的回调（如果存在）
-    if (_networkStatusCallback != null) {
-      NetworkManager().removeCallback(_networkStatusCallback!);
-    }
-    
-    // 🔴 定义回调函数并保存引用
-    _networkStatusCallback = (bool isOnline) {
-      if (!mounted) {
-        return;
-      }
-      
-      // 🔴 关键修复：如果应用在后台，不要触发UI更新
-      if (!NotificationService().isAppInForeground) {
-        return;
-      }
-      
-      // 🔴 网络断开：立即显示"正在刷新..."
-      if (!isOnline) {
-        if (!_isConnecting) {
-          setState(() {
-            _isConnecting = true;
-          });
-          logger.debug('🔄 [网络监听-通讯录] 检测到断网，立即显示正在刷新...');
-        }
-      } else {
-        // 🔴 网络恢复：检查WebSocket连接状态
-        final wsConnected = _wsService.isConnected;
-        if (!wsConnected) {
-          // WebSocket未连接，触发重连
-          logger.debug('🔄 [网络监听-通讯录] 网络恢复但WebSocket未连接，触发重连...');
-          _wsService.connect();
-        }
-        
-        // 等待WebSocket连接成功后再隐藏"正在刷新..."
-        _waitForWebSocketConnectionAfterNetworkRestore();
-      }
-    };
-    
-    // 🔴 使用 NetworkManager 插件监听真实网络连接状态（第一时间发现断网）
-    NetworkManager().startListening(_networkStatusCallback!);
-  }
-  
-  // 🔴 等待WebSocket连接成功（网络恢复后）
-  Future<void> _waitForWebSocketConnectionAfterNetworkRestore() async {
-    int waitTime = 0;
-    const maxWaitTime = 5000; // 最多等待5秒
-    
-    while (waitTime < maxWaitTime) {
-      if (_wsService.isConnected) {
-        // 连接成功，开始数据同步
-        _syncDataAfterReconnect().then((_) {
-          if (mounted) {
-            setState(() {
-              _isConnecting = false;
-            });
-            logger.debug('✅ [网络监听-通讯录] WebSocket已连接，取消刷新提示');
-          }
-        }).catchError((error) {
-          logger.error('❌ [网络监听-通讯录] 数据同步失败，隐藏刷新提示', error: error);
-          if (mounted) {
-            setState(() {
-              _isConnecting = false;
-            });
-          }
-        });
-        return;
-      }
-      await Future.delayed(const Duration(milliseconds: 200));
-      waitTime += 200;
-    }
-    
-    // 超时仍未连接，也隐藏刷新提示
-    if (mounted) {
-      setState(() {
-        _isConnecting = false;
-      });
-      logger.debug('⏰ [网络监听-通讯录] 等待WebSocket连接超时');
-    }
   }
 
   // 🔴 网络重连后同步数据
@@ -501,12 +405,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     _searchController.dispose();
     _refreshSubscription?.cancel(); // 🔴 取消刷新监听
     _networkStatusTimer?.cancel(); // 🔴 取消网络状态监听定时器（WebSocket）
-    _networkStatusSubscription?.cancel(); // 🔴 取消网络状态监听订阅（NetworkManager）
-    // 🔴 移除网络状态回调
-    if (_networkStatusCallback != null) {
-      NetworkManager().removeCallback(_networkStatusCallback!);
-      _networkStatusCallback = null;
-    }
     super.dispose();
   }
 
@@ -828,7 +726,12 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     // 使用已存储的当前用户ID，如果为空则返回空列表
     if (_currentUserId == null) return [];
     
-    var pendingContacts = _contacts.where((c) => c.isPendingForUser(_currentUserId!)).toList();
+    // 待处理的联系人：别人发给我待我审核的 + 我发出等待对方审核的
+    var pendingContacts = _contacts
+        .where((c) =>
+            c.isPendingForUser(_currentUserId!) ||
+            c.isWaitingForApproval(_currentUserId!))
+        .toList();
     
     // 按名称首字母排序
     pendingContacts = SortHelper.sortContactsByName(
@@ -912,12 +815,255 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     }
   }
 
+  // 显示"添加联系人"对话框（输入用户名 -> 发送好友请求）
+  void _showAddContactDialog() {
+    final TextEditingController usernameController = TextEditingController();
+    final outerContext = context; // 保存外层context（用于 SnackBar / loading）
+    final c = AppColors.of(context);
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 标题
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF4A90E2).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.person_add,
+                      color: Color(0xFF4A90E2),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    AppLocalizations.of(context).translate('add_contact'),
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              // 输入框
+              TextField(
+                controller: usernameController,
+                decoration: InputDecoration(
+                  hintText: '好友用户名',
+                  prefixIcon: const Icon(
+                    Icons.account_circle,
+                    color: Color(0xFF4A90E2),
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: c.divider),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF4A90E2),
+                      width: 2,
+                    ),
+                  ),
+                  filled: true,
+                  fillColor: c.inputField,
+                ),
+                autofocus: true,
+              ),
+              const SizedBox(height: 24),
+              // 按钮
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  OutlinedButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 32,
+                        vertical: 12,
+                      ),
+                      side: BorderSide(color: c.divider),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    child: Text(
+                      '取消',
+                      style: TextStyle(color: c.secondaryText, fontSize: 15),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    onPressed: () async {
+                      final username = usernameController.text.trim();
+
+                      if (username.isEmpty) {
+                        ScaffoldMessenger.of(outerContext).showSnackBar(
+                          const SnackBar(content: Text('请输入用户名')),
+                        );
+                        return;
+                      }
+
+                      // 先关闭输入对话框
+                      Navigator.pop(dialogContext);
+
+                      // 显示加载提示
+                      showDialog(
+                        context: outerContext,
+                        barrierDismissible: false,
+                        builder: (loadingContext) =>
+                            const Center(child: CircularProgressIndicator()),
+                      );
+
+                      try {
+                        logger.debug('📞 [添加联系人] 开始添加联系人: $username');
+                        final token = await Storage.getToken();
+                        if (token == null) {
+                          if (mounted) {
+                            Navigator.of(outerContext, rootNavigator: true)
+                                .pop();
+                            ScaffoldMessenger.of(outerContext).showSnackBar(
+                              const SnackBar(content: Text('未登录')),
+                            );
+                          }
+                          return;
+                        }
+
+                        final response = await ApiService.addContact(
+                          token: token,
+                          friendUsername: username,
+                        );
+                        logger.debug('✅ [添加联系人] API响应: $response');
+
+                        // 关闭加载提示
+                        if (mounted) {
+                          Navigator.of(outerContext, rootNavigator: true).pop();
+                        }
+                        if (mounted) {
+                          _handleAddContactResponse(response, outerContext);
+                        }
+                      } catch (e, stackTrace) {
+                        logger.debug('❌ [添加联系人] 失败: $e');
+                        logger.debug('❌ [添加联系人] 堆栈: $stackTrace');
+                        if (mounted) {
+                          Navigator.of(outerContext, rootNavigator: true).pop();
+                        }
+                        String errorMessage;
+                        if (e.toString().contains('网络请求失败')) {
+                          errorMessage = '网络连接失败，请检查网络设置';
+                        } else if (e.toString().contains('请求失败')) {
+                          errorMessage = '服务器响应异常: $e';
+                        } else {
+                          errorMessage = '添加失败: $e';
+                        }
+                        if (mounted) {
+                          ScaffoldMessenger.of(outerContext).showSnackBar(
+                            SnackBar(
+                              content: Text(errorMessage),
+                              duration: const Duration(seconds: 4),
+                            ),
+                          );
+                        }
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF4A90E2),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 32,
+                        vertical: 12,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: const Text(
+                      '添加',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 处理"添加联系人"API响应（与首页主菜单的添加逻辑一致）
+  void _handleAddContactResponse(
+    Map<String, dynamic> response,
+    BuildContext context,
+  ) {
+    final code = response['code'] ?? -1;
+    final message = response['message'] ?? '添加失败';
+
+    switch (code) {
+      case 0:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('好友请求已发送')),
+        );
+        break;
+      case 2:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('已向该联系人发起过申请，请耐心等待'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        break;
+      case 3:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+        break;
+      case 5:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+        break;
+      default:
+        String displayMessage = message;
+        if (message.contains('待') ||
+            message.contains('审核') ||
+            message.contains('pending')) {
+          displayMessage = '已向该联系人发起过申请，请耐心等待';
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(displayMessage)),
+        );
+    }
+  }
+
   void _showCreateGroupDialog() async {
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => MobileCreateGroupPage(
-          contacts: _contacts,
+          contacts: _contacts.where((c) => c.isApproved && !c.isDeleted).toList(),
           onCreateGroup: (group) {
             // 创建成功后清除缓存并重新加载
             logger.debug('🔄 创建群组成功（onCreateGroup回调），清除缓存并强制重新加载群组');
@@ -941,13 +1087,14 @@ class _MobileContactsPageState extends State<MobileContactsPage>
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
 
     return Column(
       children: [
         // 搜索框
         Container(
           padding: const EdgeInsets.all(12),
-          color: const Color(0xFFEEF1F6),
+          color: c.scaffold,
           child: TextField(
             controller: _searchController,
             decoration: InputDecoration(
@@ -958,7 +1105,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                 borderSide: BorderSide.none,
               ),
               filled: true,
-              fillColor: Colors.white,
+              fillColor: c.inputField,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 16,
                 vertical: 8,
@@ -972,7 +1119,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
         // Tab栏
         Container(
-          color: Colors.white,
+          color: c.surface,
           child: LayoutBuilder(
             builder: (context, constraints) {
               // 计算每个tab的宽度
@@ -985,7 +1132,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
               return TabBar(
                 controller: _tabController,
                 labelColor: const Color(0xFF4A90E2),
-                unselectedLabelColor: Colors.grey[600],
+                unselectedLabelColor: c.secondaryText,
                 indicatorColor: const Color(0xFF4A90E2),
                 labelPadding: EdgeInsets.zero,
                 isScrollable: true,
@@ -1074,7 +1221,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
         // Tab内容
         Expanded(
           child: Container(
-            color: const Color(0xFFEEF1F6),
+            color: c.scaffold,
             child: TabBarView(
               controller: _tabController,
               children: [
@@ -1099,23 +1246,24 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
   // 新联系人列表（待审核的联系人）
   Widget _buildNewContactsList() {
+    final c = AppColors.of(context);
     if (_isLoadingContacts) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: const Center(child: CircularProgressIndicator()),
       );
     }
 
     if (_contactsError != null) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.error_outline, size: 48, color: Colors.grey),
+              Icon(Icons.error_outline, size: 48, color: c.secondaryText),
               const SizedBox(height: 16),
-              Text(_contactsError!, style: const TextStyle(color: Colors.grey)),
+              Text(_contactsError!, style: TextStyle(color: c.secondaryText)),
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: _loadContacts,
@@ -1131,22 +1279,22 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
     if (contacts.isEmpty) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(
+              Icon(
                 Icons.person_add_outlined,
                 size: 64,
-                color: Colors.grey,
+                color: c.secondaryText,
               ),
               const SizedBox(height: 16),
               Text(
-                _searchText.isEmpty 
+                _searchText.isEmpty
                     ? AppLocalizations.of(context).translate('no_new_contacts')
                     : AppLocalizations.of(context).translate('no_search_contacts_results'),
-                style: const TextStyle(color: Colors.grey, fontSize: 16),
+                style: TextStyle(color: c.secondaryText, fontSize: 16),
               ),
             ],
           ),
@@ -1155,7 +1303,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     }
 
     return Container(
-      color: const Color(0xFFEEF1F6),
+      color: c.scaffold,
       child: RefreshIndicator(
         onRefresh: () async {
           // 🔴 优先调用网络刷新方法（包含网络重连）
@@ -1174,25 +1322,26 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
   // 群通知列表（待审核的群组成员）
   Widget _buildPendingMembersList() {
+    final c = AppColors.of(context);
     if (_isLoadingPendingMembers) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: const Center(child: CircularProgressIndicator()),
       );
     }
 
     if (_pendingMembersError != null) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.error_outline, size: 48, color: Colors.grey),
+              Icon(Icons.error_outline, size: 48, color: c.secondaryText),
               const SizedBox(height: 16),
               Text(
                 _pendingMembersError!,
-                style: const TextStyle(color: Colors.grey),
+                style: TextStyle(color: c.secondaryText),
               ),
               const SizedBox(height: 16),
               ElevatedButton(
@@ -1209,22 +1358,22 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
     if (members.isEmpty) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(
+              Icon(
                 Icons.notifications_none,
                 size: 64,
-                color: Colors.grey,
+                color: c.secondaryText,
               ),
               const SizedBox(height: 16),
               Text(
-                _searchText.isEmpty 
+                _searchText.isEmpty
                     ? AppLocalizations.of(context).translate('no_pending_members')
                     : AppLocalizations.of(context).translate('no_search_contacts_results'),
-                style: const TextStyle(color: Colors.grey, fontSize: 16),
+                style: TextStyle(color: c.secondaryText, fontSize: 16),
               ),
             ],
           ),
@@ -1233,7 +1382,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     }
 
     return Container(
-      color: const Color(0xFFEEF1F6),
+      color: c.scaffold,
       child: RefreshIndicator(
         onRefresh: () async {
           // 🔴 优先调用网络刷新方法（包含网络重连）
@@ -1252,6 +1401,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
   // 联系人列表（已通过审核的）
   Widget _buildContactsList() {
+    final c = AppColors.of(context);
     if (_isLoadingContacts) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -1261,9 +1411,9 @@ class _MobileContactsPageState extends State<MobileContactsPage>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.error_outline, size: 48, color: Colors.grey),
+            Icon(Icons.error_outline, size: 48, color: c.secondaryText),
             const SizedBox(height: 16),
-            Text(_contactsError!, style: const TextStyle(color: Colors.grey)),
+            Text(_contactsError!, style: TextStyle(color: c.secondaryText)),
             const SizedBox(height: 16),
             ElevatedButton(
               onPressed: _loadContacts,
@@ -1281,30 +1431,43 @@ class _MobileContactsPageState extends State<MobileContactsPage>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.people_outline, size: 64, color: Colors.grey),
+            Icon(Icons.people_outline, size: 64, color: c.secondaryText),
             const SizedBox(height: 16),
             Text(
               _searchText.isEmpty
                   ? AppLocalizations.of(context).translate('no_contacts')
                   : AppLocalizations.of(context).translate('no_search_results'),
-              style: const TextStyle(color: Colors.grey, fontSize: 16),
+              style: TextStyle(color: c.secondaryText, fontSize: 16),
             ),
+            if (_searchText.isEmpty) ...[
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: _showAddContactDialog,
+                icon: const Icon(Icons.person_add),
+                label: Text(
+                  AppLocalizations.of(context).translate('add_contact'),
+                ),
+              ),
+            ],
           ],
         ),
       );
     }
 
     return Container(
-      color: const Color(0xFFEEF1F6),
+      color: c.scaffold,
       child: RefreshIndicator(
         onRefresh: () async {
           // 🔴 优先调用网络刷新方法（包含网络重连）
           await _onRefresh();
         },
         child: ListView.builder(
-          itemCount: contacts.length,
+          itemCount: contacts.length + 1, // +1 for add-contact button
           itemBuilder: (context, index) {
-            final contact = contacts[index];
+            if (index == 0) {
+              return _buildAddContactTile();
+            }
+            final contact = contacts[index - 1];
             return _buildContactItem(contact);
           },
         ),
@@ -1312,24 +1475,52 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     );
   }
 
+  // 添加联系人入口按钮（样式参考"群组"tab的"创建群组"按钮）
+  Widget _buildAddContactTile() {
+    return ListTile(
+      leading: Container(
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          color: const Color(0xFF4A90E2),
+          borderRadius: BorderRadius.circular(24),
+        ),
+        child: const Icon(
+          Icons.person_add,
+          color: Colors.white,
+          size: 24,
+        ),
+      ),
+      title: Text(
+        AppLocalizations.of(context).translate('add_contact'),
+        style: const TextStyle(
+          fontWeight: FontWeight.w500,
+          color: Color(0xFF4A90E2),
+        ),
+      ),
+      onTap: _showAddContactDialog,
+    );
+  }
+
   Widget _buildGroupsList() {
+    final c = AppColors.of(context);
     if (_isLoadingGroups) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: const Center(child: CircularProgressIndicator()),
       );
     }
 
     if (_groupsError != null) {
       return Container(
-        color: const Color(0xFFEEF1F6),
+        color: c.scaffold,
         child: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.error_outline, size: 48, color: Colors.grey),
+              Icon(Icons.error_outline, size: 48, color: c.secondaryText),
               const SizedBox(height: 16),
-              Text(_groupsError!, style: const TextStyle(color: Colors.grey)),
+              Text(_groupsError!, style: TextStyle(color: c.secondaryText)),
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: _loadGroups,
@@ -1344,7 +1535,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     final groups = _filteredGroups;
 
     return Container(
-      color: const Color(0xFFEEF1F6),
+      color: c.scaffold,
       child: RefreshIndicator(
         onRefresh: () async {
           // 🔴 优先调用网络刷新方法（包含网络重连）
@@ -1355,10 +1546,10 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.group_outlined,
                       size: 64,
-                      color: Colors.grey,
+                      color: c.secondaryText,
                     ),
                     const SizedBox(height: 16),
                     Text(
@@ -1367,7 +1558,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                           : AppLocalizations.of(
                               context,
                             ).translate('no_search_results'),
-                      style: const TextStyle(color: Colors.grey, fontSize: 16),
+                      style: TextStyle(color: c.secondaryText, fontSize: 16),
                     ),
                     if (_searchText.isEmpty) ...[
                       const SizedBox(height: 16),
@@ -1423,6 +1614,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
   }
 
   Widget _buildContactItem(ContactModel contact) {
+    final c = AppColors.of(context);
     return InkWell(
       onTap: () async {
         // 🔴 打开聊天前，先检查并移除删除标记（如果存在）
@@ -1456,7 +1648,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
         );
       },
       child: Container(
-        color: Colors.white,
+        color: c.surface,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
           children: [
@@ -1516,7 +1708,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                       contact.workSignature!.isNotEmpty)
                     Text(
                       contact.workSignature!,
-                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                      style: TextStyle(color: c.secondaryText, fontSize: 12),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -1530,6 +1722,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
   }
 
   Widget _buildGroupItem(GroupModel group) {
+    final c = AppColors.of(context);
     final hasAvatar = group.avatar != null && group.avatar!.isNotEmpty;
 
     return ListTile(
@@ -1554,7 +1747,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
           final memberCount = snapshot.data ?? 0;
           return Text(
             '${memberCount}人',
-            style: TextStyle(color: Colors.grey[600], fontSize: 14),
+            style: TextStyle(color: c.secondaryText, fontSize: 14),
           );
         },
       ),
@@ -1621,6 +1814,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
   // 新联系人项（待审核，带审核按钮）
   Widget _buildNewContactItem(ContactModel contact) {
+    final c = AppColors.of(context);
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       leading: CircleAvatar(
@@ -1651,39 +1845,54 @@ class _MobileContactsPageState extends State<MobileContactsPage>
       subtitle: contact.department != null && contact.department!.isNotEmpty
           ? Text(
               contact.department!,
-              style: TextStyle(color: Colors.grey[600], fontSize: 14),
+              style: TextStyle(color: c.secondaryText, fontSize: 14),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             )
           : null,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // 拒绝按钮
-          ElevatedButton(
-            onPressed: () => _handleContactApproval(contact, 'rejected'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.grey[300],
-              foregroundColor: Colors.black87,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              minimumSize: const Size(60, 32),
+      trailing: _currentUserId != null && contact.isPendingForUser(_currentUserId!)
+          // 别人发给我的请求：显示审核按钮
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 拒绝按钮
+                ElevatedButton(
+                  onPressed: () => _handleContactApproval(contact, 'rejected'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.grey[300],
+                    foregroundColor: Colors.black87,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    minimumSize: const Size(60, 32),
+                  ),
+                  child: Text(AppLocalizations.of(context).translate('reject'), style: const TextStyle(fontSize: 12)),
+                ),
+                const SizedBox(width: 8),
+                // 通过按钮
+                ElevatedButton(
+                  onPressed: () => _handleContactApproval(contact, 'approved'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4A90E2),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    minimumSize: const Size(60, 32),
+                  ),
+                  child: Text(AppLocalizations.of(context).translate('approve'), style: const TextStyle(fontSize: 12)),
+                ),
+              ],
+            )
+          // 我发出的请求：显示等待审核标签
+          : Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE3F2FD),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: const Color(0xFFBBDEFB), width: 1),
+              ),
+              child: const Text(
+                '等待审核',
+                style: TextStyle(fontSize: 12, color: Color(0xFF1976D2)),
+              ),
             ),
-            child: Text(AppLocalizations.of(context).translate('reject'), style: const TextStyle(fontSize: 12)),
-          ),
-          const SizedBox(width: 8),
-          // 通过按钮
-          ElevatedButton(
-            onPressed: () => _handleContactApproval(contact, 'approved'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF4A90E2),
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              minimumSize: const Size(60, 32),
-            ),
-            child: Text(AppLocalizations.of(context).translate('approve'), style: const TextStyle(fontSize: 12)),
-          ),
-        ],
-      ),
     );
   }
 
@@ -1694,9 +1903,10 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     final avatar = member['avatar'] as String?;
     
     // 如果昵称超过9个字符，截断并添加省略号
-    final truncatedName = displayName.length > 9 
-        ? '${displayName.substring(0, 9)}...' 
+    final truncatedName = displayName.length > 9
+        ? '${displayName.substring(0, 9)}...'
         : displayName;
+    final c = AppColors.of(context);
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -1725,7 +1935,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
       ),
       subtitle: Text(
         '申请加入：$groupName',
-        style: TextStyle(color: Colors.grey[600], fontSize: 14),
+        style: TextStyle(color: c.secondaryText, fontSize: 14),
       ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1900,6 +2110,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
   }
 
   void _showUserInfo(int userId) {
+    final c = AppColors.of(context);
     // 从联系人列表中找到对应的联系人
     final contact = _contacts.firstWhere(
       (c) => c.friendId == userId,
@@ -1924,10 +2135,10 @@ class _MobileContactsPageState extends State<MobileContactsPage>
               minChildSize: 0.5,
               builder: (context, scrollController) {
                 return Container(
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
+                  decoration: BoxDecoration(
+                    color: c.surface,
                     borderRadius:
-                        BorderRadius.vertical(top: Radius.circular(20)),
+                        const BorderRadius.vertical(top: Radius.circular(20)),
                   ),
                   child: SingleChildScrollView(
                     controller: scrollController,
@@ -1940,7 +2151,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                           width: 40,
                           height: 4,
                           decoration: BoxDecoration(
-                            color: Colors.grey[300],
+                            color: c.divider,
                             borderRadius: BorderRadius.circular(2),
                           ),
                         ),
@@ -1988,7 +2199,7 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                             '用户名: ${contact.username}',
                             style: TextStyle(
                               fontSize: 14,
-                              color: Colors.grey[600],
+                              color: c.secondaryText,
                             ),
                           ),
 
@@ -2172,11 +2383,12 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     required String label,
     required String value,
   }) {
+    final c = AppColors.of(context);
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFFF5F7FA),
+        color: c.surfaceVariant,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -2195,15 +2407,15 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                   label,
                   style: TextStyle(
                     fontSize: 12,
-                    color: Colors.grey[600],
+                    color: c.secondaryText,
                   ),
                 ),
                 const SizedBox(height: 4),
                 Text(
                   value,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 16,
-                    color: Colors.black87,
+                    color: c.primaryText,
                   ),
                 ),
               ],

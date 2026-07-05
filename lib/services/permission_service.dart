@@ -253,7 +253,7 @@ class PermissionService {
             ),
             const SizedBox(height: 12),
             const Text(
-              '点击"去设置"将跳转到系统设置页面，请在"有度"应用设置中开启相应权限。',
+              '点击"去设置"将跳转到系统设置页面，请在"Telegram"应用设置中开启相应权限。',
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),
           ],

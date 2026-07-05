@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'verify_code_page.dart';
-import 'package:youdu/services/api_service.dart';
+import 'package:telegram/services/api_service.dart';
 import '../utils/logger.dart';
 
 class ForgotPasswordPage extends StatefulWidget {

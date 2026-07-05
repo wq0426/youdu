@@ -5,12 +5,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"youdu-server/config"
-	"youdu-server/db"
-	"youdu-server/routes"
-	"youdu-server/services"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/config"
+	"telegram-server/db"
+	"telegram-server/routes"
+	"telegram-server/services"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 )
 
 func main() {
@@ -61,6 +61,10 @@ func main() {
 	services.InitTencentIM()
 	utils.LogInfo("✅ 腾讯云 IM 服务初始化完成")
 
+	// 初始化 Agora Chat 群组服务（消息体系迁移到 Agora Chat）
+	services.InitAgoraChatGroup()
+	utils.LogInfo("✅ Agora Chat 群组服务初始化完成")
+
 	// 加载已解散的群组到内存 - 暂时禁用（groups表不存在）
 	// disbandedManager := models.GetDisbandedGroupsManager()
 	// if err := disbandedManager.LoadDisbandedGroups(); err != nil {
@@ -68,9 +72,9 @@ func main() {
 	// }
 	// utils.LogInfo("✅ 已解散群组管理器初始化成功")
 
-	// 创建并启动WebSocket Hub
+	// 创建WebSocket Hub
+	// 🔴 Hub 已改为细粒度锁的直接方法调用，不再需要单独的事件循环 goroutine
 	hub := ws.NewHub()
-	go hub.Run()
 	utils.LogInfo("✅ WebSocket Hub已启动")
 
 	// 启动心跳检查定时器（每15秒检查一次）

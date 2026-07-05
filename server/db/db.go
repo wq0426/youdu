@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"youdu-server/config"
+	"telegram-server/config"
 
 	_ "github.com/lib/pq"
 )
@@ -61,6 +61,77 @@ func InitDB() error {
 		// 不返回错误，继续运行
 	} else {
 		fmt.Printf("✅ 数据库时区已设置为 UTC\n")
+	}
+
+	// 轻量自迁移：消息体系迁移到 Agora Chat 后，groups 表需要存放 Agora 分配的群ID。
+	// 无独立迁移执行器，这里用 IF NOT EXISTS 幂等补列，避免漏跑 SQL 脚本。
+	if _, err = DB.Exec(`ALTER TABLE groups ADD COLUMN IF NOT EXISTS agora_group_id varchar(64)`); err != nil {
+		fmt.Printf("⚠️ 添加 groups.agora_group_id 列失败: %v\n", err)
+	}
+
+	// 轻量自迁移：邀请码支持多次使用，需要 total_count / used_count 两列。
+	// 对应 db/migrations/add_invite_codes_usage_count.sql，缺列会导致注册时邀请码校验报错。
+	if _, err = DB.Exec(`ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS total_count INTEGER DEFAULT 1`); err != nil {
+		fmt.Printf("⚠️ 添加 invite_codes.total_count 列失败: %v\n", err)
+	}
+	if _, err = DB.Exec(`ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS used_count INTEGER DEFAULT 0`); err != nil {
+		fmt.Printf("⚠️ 添加 invite_codes.used_count 列失败: %v\n", err)
+	}
+	// 历史数据回填：已标记为 used 的邀请码补齐 used_count
+	if _, err = DB.Exec(`UPDATE invite_codes SET used_count = 1 WHERE status = 'used' AND used_count = 0`); err != nil {
+		fmt.Printf("⚠️ 回填 invite_codes.used_count 失败: %v\n", err)
+	}
+
+	// 轻量自迁移：消息同步归档表（对应 migrations/create_synced_message_tables.sql）。
+	// 消息迁移到 Agora Chat 后服务器不再经手聊天消息，由接收方客户端异步上报归档，
+	// 供管理后台展示/搜索单聊与群聊记录。agora_msg_id 唯一约束保证重复上报幂等。
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS synced_messages (
+			id BIGSERIAL PRIMARY KEY,
+			agora_msg_id VARCHAR(64) NOT NULL UNIQUE,
+			sender_id INTEGER NOT NULL,
+			sender_name VARCHAR(255) DEFAULT '',
+			receiver_id INTEGER NOT NULL,
+			receiver_name VARCHAR(255) DEFAULT '',
+			content TEXT DEFAULT '',
+			message_type VARCHAR(32) DEFAULT 'text',
+			file_name VARCHAR(512),
+			voice_duration INTEGER,
+			call_type VARCHAR(32),
+			quoted_message_content TEXT,
+			status VARCHAR(16) DEFAULT 'normal',
+			is_read BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMP NOT NULL,
+			synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_messages_created_at ON synced_messages (created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_messages_sender ON synced_messages (sender_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_messages_receiver ON synced_messages (receiver_id)`,
+		`CREATE TABLE IF NOT EXISTS synced_group_messages (
+			id BIGSERIAL PRIMARY KEY,
+			agora_msg_id VARCHAR(64) NOT NULL UNIQUE,
+			group_id INTEGER NOT NULL,
+			sender_id INTEGER NOT NULL,
+			sender_name VARCHAR(255) DEFAULT '',
+			sender_nickname VARCHAR(255),
+			sender_full_name VARCHAR(255),
+			content TEXT DEFAULT '',
+			message_type VARCHAR(32) DEFAULT 'text',
+			file_name VARCHAR(512),
+			voice_duration INTEGER,
+			call_type VARCHAR(32),
+			quoted_message_content TEXT,
+			status VARCHAR(16) DEFAULT 'normal',
+			created_at TIMESTAMP NOT NULL,
+			synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_group_messages_created_at ON synced_group_messages (created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_group_messages_group ON synced_group_messages (group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_group_messages_sender ON synced_group_messages (sender_id)`,
+	} {
+		if _, err = DB.Exec(q); err != nil {
+			fmt.Printf("⚠️ 创建消息同步归档表失败: %v\n", err)
+		}
 	}
 
 	fmt.Printf("Database connected successfully")

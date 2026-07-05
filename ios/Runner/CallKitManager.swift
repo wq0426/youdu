@@ -42,7 +42,7 @@ class CallKitManager: NSObject {
         
         // 设置 Flutter Method Channel
         methodChannel = FlutterMethodChannel(
-            name: "com.example.youdu/callkit",
+            name: "com.example.telegram/callkit",
             binaryMessenger: binaryMessenger
         )
         
@@ -64,7 +64,7 @@ class CallKitManager: NSObject {
         if #available(iOS 14.0, *) {
             config = CXProviderConfiguration()
         } else {
-            config = CXProviderConfiguration(localizedName: "有度")
+            config = CXProviderConfiguration(localizedName: "Telegram")
         }
         config.supportsVideo = true
         config.maximumCallsPerCallGroup = 1

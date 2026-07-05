@@ -18,6 +18,7 @@ type Group struct {
 	InviteConfirmation   bool       `json:"invite_confirmation" db:"invite_confirmation"`       // 是否开启群聊邀请确认
 	AdminOnlyEditName    bool       `json:"admin_only_edit_name" db:"admin_only_edit_name"`     // 是否仅群主/管理员可修改群名称
 	MemberViewPermission bool       `json:"member_view_permission" db:"member_view_permission"` // 群成员查看权限：true=普通成员可以查看其他成员信息，false=不可以
+	AgoraGroupID         *string    `json:"agora_group_id,omitempty" db:"agora_group_id"`       // Agora Chat 群会话ID（消息体系迁移到 Agora Chat 后承载群聊）
 	CreatedAt            time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at" db:"updated_at"`
 	DeletedAt            *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
@@ -124,6 +125,7 @@ type GroupWithRemark struct {
 	InviteConfirmation   bool      `json:"invite_confirmation" db:"invite_confirmation"`       // 是否开启群聊邀请确认
 	AdminOnlyEditName    bool      `json:"admin_only_edit_name" db:"admin_only_edit_name"`     // 是否仅群主/管理员可修改群名称
 	MemberViewPermission bool      `json:"member_view_permission" db:"member_view_permission"` // 群成员查看权限：true=普通成员可以查看其他成员信息，false=不可以
+	AgoraGroupID         *string   `json:"agora_group_id,omitempty" db:"agora_group_id"`       // Agora Chat 群会话ID
 	MemberIDs            []int     `json:"member_ids"`                                         // 群组成员ID列表
 	CreatedAt            time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at" db:"updated_at"`
@@ -246,7 +248,7 @@ func (r *GroupRepository) AddGroupMemberWithApproval(groupID, userID int, nickna
 // GetGroupByID 根据ID获取群组
 func (r *GroupRepository) GetGroupByID(groupID int) (*Group, error) {
 	query := `
-		SELECT id, name, announcement, avatar, owner_id, all_muted, invite_confirmation, admin_only_edit_name, member_view_permission, created_at, updated_at, deleted_at
+		SELECT id, name, announcement, avatar, owner_id, all_muted, invite_confirmation, admin_only_edit_name, member_view_permission, agora_group_id, created_at, updated_at, deleted_at
 		FROM groups
 		WHERE id = $1 AND deleted_at IS NULL
 	`
@@ -262,12 +264,32 @@ func (r *GroupRepository) GetGroupByID(groupID int) (*Group, error) {
 		&group.InviteConfirmation,
 		&group.AdminOnlyEditName,
 		&group.MemberViewPermission,
+		&group.AgoraGroupID,
 		&group.CreatedAt,
 		&group.UpdatedAt,
 		&group.DeletedAt,
 	)
 
 	return group, err
+}
+
+// SetAgoraGroupID 回写 Agora Chat 分配的群会话ID
+func (r *GroupRepository) SetAgoraGroupID(groupID int, agoraGroupID string) error {
+	_, err := r.DB.Exec(`UPDATE groups SET agora_group_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, agoraGroupID, groupID)
+	return err
+}
+
+// GetAgoraGroupID 读取群组的 Agora Chat 群会话ID（未同步时返回空串）
+func (r *GroupRepository) GetAgoraGroupID(groupID int) (string, error) {
+	var agoraGroupID sql.NullString
+	err := r.DB.QueryRow(`SELECT agora_group_id FROM groups WHERE id = $1`, groupID).Scan(&agoraGroupID)
+	if err != nil {
+		return "", err
+	}
+	if agoraGroupID.Valid {
+		return agoraGroupID.String, nil
+	}
+	return "", nil
 }
 
 // GetGroupMembers 获取群组成员列表（带自定义排序）
@@ -543,7 +565,7 @@ func (r *GroupRepository) DeleteGroup(groupID int) error {
 // GetUserGroups 获取用户加入的所有群组
 func (r *GroupRepository) GetUserGroups(userID int) ([]Group, error) {
 	query := `
-		SELECT g.id, g.name, g.announcement, g.avatar, g.owner_id, g.all_muted, g.invite_confirmation, g.admin_only_edit_name, g.member_view_permission, g.created_at, g.updated_at, g.deleted_at
+		SELECT g.id, g.name, g.announcement, g.avatar, g.owner_id, g.all_muted, g.invite_confirmation, g.admin_only_edit_name, g.member_view_permission, g.agora_group_id, g.created_at, g.updated_at, g.deleted_at
 		FROM groups g
 		JOIN group_members gm ON g.id = gm.group_id
 		WHERE gm.user_id = $1 AND g.deleted_at IS NULL AND gm.approval_status = 'approved'
@@ -569,6 +591,7 @@ func (r *GroupRepository) GetUserGroups(userID int) ([]Group, error) {
 			&group.InviteConfirmation,
 			&group.AdminOnlyEditName,
 			&group.MemberViewPermission,
+			&group.AgoraGroupID,
 			&group.CreatedAt,
 			&group.UpdatedAt,
 			&group.DeletedAt,
@@ -585,7 +608,7 @@ func (r *GroupRepository) GetUserGroups(userID int) ([]Group, error) {
 // GetUserGroupsWithRemark 获取用户加入的所有群组（包含用户对群组的备注）
 func (r *GroupRepository) GetUserGroupsWithRemark(userID int) ([]GroupWithRemark, error) {
 	query := `
-		SELECT g.id, g.name, g.announcement, g.avatar, g.owner_id, g.all_muted, g.invite_confirmation, g.admin_only_edit_name, g.member_view_permission, g.created_at, g.updated_at, gm.remark
+		SELECT g.id, g.name, g.announcement, g.avatar, g.owner_id, g.all_muted, g.invite_confirmation, g.admin_only_edit_name, g.member_view_permission, g.agora_group_id, g.created_at, g.updated_at, gm.remark
 		FROM groups g
 		JOIN group_members gm ON g.id = gm.group_id
 		WHERE gm.user_id = $1 AND g.deleted_at IS NULL AND gm.approval_status = 'approved'
@@ -611,6 +634,7 @@ func (r *GroupRepository) GetUserGroupsWithRemark(userID int) ([]GroupWithRemark
 			&group.InviteConfirmation,
 			&group.AdminOnlyEditName,
 			&group.MemberViewPermission,
+			&group.AgoraGroupID,
 			&group.CreatedAt,
 			&group.UpdatedAt,
 			&group.Remark,
@@ -642,164 +666,6 @@ func (r *GroupRepository) GetUserGroupsWithRemark(userID int) ([]GroupWithRemark
 	}
 
 	return groups, nil
-}
-
-// CreateGroupMessage 创建群组消息
-func (r *GroupRepository) CreateGroupMessage(msg *CreateGroupMessageRequest, senderID int, senderName string, senderNickname *string, senderFullName *string, senderAvatar *string) (*GroupMessage, error) {
-	// 确定消息类型
-	messageType := msg.MessageType
-	if messageType == "" {
-		messageType = "text"
-	}
-
-	// 注意：sender_name 已经由调用方确定好（群昵称 > 全名 > 用户名的优先级）
-	// sender_nickname 和 sender_full_name 单独保存，用于前端显示逻辑
-
-	// 🔴 显式使用 UTC 时间，确保时区一致性
-	query := `
-		INSERT INTO group_messages (group_id, sender_id, sender_name, sender_nickname, sender_full_name, sender_avatar, content, message_type, file_name, quoted_message_id, quoted_message_content, mentioned_user_ids, mentions, voice_duration, server_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-		RETURNING id, group_id, sender_id, sender_name, sender_nickname, sender_full_name, sender_avatar, content, message_type, file_name, quoted_message_id, quoted_message_content, mentioned_user_ids, mentions, voice_duration, status, created_at
-	`
-
-	var fileName *string
-	if msg.FileName != "" {
-		fileName = &msg.FileName
-	}
-
-	var quotedMessageID *int
-	if msg.QuotedMessageID > 0 {
-		quotedMessageID = &msg.QuotedMessageID
-	}
-
-	var quotedMessageContent *string
-	if msg.QuotedMessageContent != "" {
-		quotedMessageContent = &msg.QuotedMessageContent
-	}
-
-	// 处理@相关字段
-	var mentionedUserIDs *string
-	if len(msg.MentionedUserIds) > 0 {
-		// 将int数组转换为逗号分隔的字符串
-		var ids string
-		for i, id := range msg.MentionedUserIds {
-			if i > 0 {
-				ids += ","
-			}
-			ids += fmt.Sprintf("%d", id)
-		}
-		mentionedUserIDs = &ids
-	}
-
-	var mentions *string
-	if msg.Mentions != "" {
-		mentions = &msg.Mentions
-	}
-
-	// 处理语音时长
-	var voiceDuration *int
-	if msg.VoiceDuration > 0 {
-		voiceDuration = &msg.VoiceDuration
-	}
-
-	// 处理客户端群组消息ID（存入server_id字段）
-	var clientGroupMessageIDPtr *int
-	if msg.ClientGroupMessageID > 0 {
-		clientGroupMessageIDPtr = &msg.ClientGroupMessageID
-	}
-
-	message := &GroupMessage{}
-	// 🔴 使用 UTC 时间
-	now := time.Now().UTC()
-	err := r.DB.QueryRow(query, msg.GroupID, senderID, senderName, senderNickname, senderFullName, senderAvatar, msg.Content, messageType, fileName, quotedMessageID, quotedMessageContent, mentionedUserIDs, mentions, voiceDuration, clientGroupMessageIDPtr, now).Scan(
-		&message.ID,
-		&message.GroupID,
-		&message.SenderID,
-		&message.SenderName,
-		&message.SenderNickname,
-		&message.SenderFullName,
-		&message.SenderAvatar,
-		&message.Content,
-		&message.MessageType,
-		&message.FileName,
-		&message.QuotedMessageID,
-		&message.QuotedMessageContent,
-		&message.MentionedUserIDs,
-		&message.Mentions,
-		&message.VoiceDuration,
-		&message.Status,
-		&message.CreatedAt,
-	)
-
-	return message, err
-}
-
-// GetGroupMessages 获取群组消息列表
-func (r *GroupRepository) GetGroupMessages(groupID int, limit int) ([]GroupMessage, error) {
-	query := `
-		SELECT 
-			gm.id, 
-			gm.group_id, 
-			gm.sender_id, 
-			gm.sender_name,
-			gm.sender_avatar,
-			gmem.nickname as sender_nickname,
-			gm.content, 
-			gm.message_type, 
-			gm.file_name, 
-		    gm.quoted_message_id, 
-			gm.quoted_message_content,
-			gm.mentioned_user_ids,
-			gm.mentions,
-			gm.voice_duration,
-			gm.status, 
-			gm.created_at
-		FROM group_messages gm
-		LEFT JOIN group_members gmem ON gmem.group_id = gm.group_id AND gmem.user_id = gm.sender_id
-		WHERE gm.group_id = $1
-		ORDER BY gm.created_at DESC
-		LIMIT $2
-	`
-
-	rows, err := r.DB.Query(query, groupID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var messages []GroupMessage
-	for rows.Next() {
-		var msg GroupMessage
-		err := rows.Scan(
-			&msg.ID,
-			&msg.GroupID,
-			&msg.SenderID,
-			&msg.SenderName,
-			&msg.SenderAvatar,
-			&msg.SenderNickname,
-			&msg.Content,
-			&msg.MessageType,
-			&msg.FileName,
-			&msg.QuotedMessageID,
-			&msg.QuotedMessageContent,
-			&msg.MentionedUserIDs,
-			&msg.Mentions,
-			&msg.VoiceDuration,
-			&msg.Status,
-			&msg.CreatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
-	}
-
-	// 反转消息顺序（从旧到新）
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-
-	return messages, nil
 }
 
 // GetGroupMemberIDs 获取群组所有成员ID列表（仅返回已通过审核的成员）

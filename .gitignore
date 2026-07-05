@@ -16,7 +16,7 @@ logs/*
 server/logs/*
 build/
 server.tar.gz
-youdu-server.exe
+telegram-server.exe
 
 # IntelliJ related
 *.iml
@@ -84,7 +84,7 @@ server.exe
 admin/dist
 admin/dist/*
 dist.tar.gz
-youdu-server
+telegram-server
 
 pubspec.lock
 install/*
@@ -99,15 +99,16 @@ server.tar.gz
 server2.tar.gz
 
 Podfile.lock
-youdu-server
-youdu-server.exe
-youdu-server-darwin
-youdu-server-linux-amd64
-youdu-server-windows-amd64.exe
-youdu-server-darwin-arm64
-youdu-server-linux-arm64
-youdu-server-windows-arm64.exe
+telegram-server
+telegram-server.exe
+telegram-server-darwin
+telegram-server-linux-amd64
+telegram-server-windows-amd64.exe
+telegram-server-darwin-arm64
+telegram-server-linux-arm64
+telegram-server-windows-arm64.exe
 
 docs/*
 pubspec.lock
 ios/Podfile.lock
+dist/

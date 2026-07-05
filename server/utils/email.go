@@ -6,7 +6,7 @@ import (
 	"net/smtp"
 	"strings"
 
-	"youdu-server/config"
+	"telegram-server/config"
 )
 
 // SendEmailCode 发送邮箱验证码

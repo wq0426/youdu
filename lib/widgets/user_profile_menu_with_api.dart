@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:youdu/services/api_service.dart';
-import 'package:youdu/models/user_model.dart';
+import 'package:telegram/services/api_service.dart';
+import 'package:telegram/models/user_model.dart';
 import 'user_profile_menu.dart';
 
 /// 个人信息弹窗菜单（带API集成）

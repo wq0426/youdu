@@ -79,16 +79,16 @@ format:
 # Build and run Release version
 run-release: build-release
 	@echo "Starting Release version..."
-	@cd build/windows/x64/runner/Release && ./youdu.exe
+	@cd build/windows/x64/runner/Release && ./telegram.exe
 
 # Package for distribution (build + organize files)
 package: build-release
 	@echo "Packaging application..."
 	@mkdir -p release
-	@rm -rf release/youdu
-	@cp -r build/windows/x64/runner/Release release/youdu
-	@echo "Package complete! Release files location: release/youdu/"
-	@echo "You can distribute the release/youdu folder to users"
+	@rm -rf release/telegram
+	@cp -r build/windows/x64/runner/Release release/telegram
+	@echo "Package complete! Release files location: release/telegram/"
+	@echo "You can distribute the release/telegram folder to users"
 
 # Clean package files
 clean-package:

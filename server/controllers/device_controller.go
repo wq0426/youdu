@@ -12,7 +12,7 @@ import (
 	// "time"
 
 	"github.com/gin-gonic/gin"
-	"youdu-server/db"
+	"telegram-server/db"
 )
 
 type DeviceController struct{}

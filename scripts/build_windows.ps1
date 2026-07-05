@@ -217,7 +217,7 @@ Write-Host ""
 Write-Info "Checking generated key files..."
 
 $KeyFiles = @{
-    "youdu.exe" = "Main executable"
+    "telegram.exe" = "Main executable"
     "sqlite3.dll" = "SQLCipher library"
     "sqlcipher_flutter_libs_plugin.dll" = "SQLCipher plugin"
     "flutter_windows.dll" = "Flutter runtime"
@@ -249,6 +249,18 @@ if ($AllFilesExist) {
 }
 
 Write-Info "Output directory: $BuildDir"
+Write-Host ""
+
+# Package into a distributable zip: telegram-windows-v<version>.zip in dist/
+Write-Info "Packaging Windows client into zip..."
+$PubspecVersion = (Select-String -Path "$ProjectPath\pubspec.yaml" -Pattern '^version:\s*([^\s+]+)').Matches[0].Groups[1].Value
+$DistDir = Join-Path $ProjectPath "dist"
+if (-not (Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir | Out-Null }
+$ZipPath = Join-Path $DistDir "telegram-windows-v$PubspecVersion.zip"
+if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+Compress-Archive -Path "$BuildDir\*" -DestinationPath $ZipPath -CompressionLevel Optimal
+$ZipSizeMB = [math]::Round((Get-Item $ZipPath).Length / 1MB, 2)
+Write-Success "Package created: $ZipPath ($ZipSizeMB MB)"
 Write-Host ""
 
 # Show run command tip

@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import '../utils/logger.dart';
 import '../utils/storage.dart';
+import '../pages/mobile_chat_page.dart';
+import '../pages/mobile_home_page.dart';
 import 'database_repair_service.dart';
 import 'favorite_service.dart';
-import 'api_service.dart';
+import 'agora_chat_service.dart';
 import 'local_database_service.dart';
 
 /// 同步状态回调类型
@@ -35,6 +39,9 @@ class AppInitializationService {
         return;
       }
 
+      // 登录 Agora Chat（即时通讯），用于消息收发。失败不阻塞其余初始化。
+      await _loginAgoraChat();
+
       // 检查是否需要进行数据库修复
       logger.debug('🔧 [应用初始化] 检查数据库修复需求...');
       await _checkAndRepairDatabase();
@@ -46,25 +53,20 @@ class AppInitializationService {
       
       if (isFirstInstall) {
         logger.debug('═══════════════════════════════════════════════════════════');
-        logger.debug('📱 [应用初始化] 检测到首次安装/数据库迁移，开始从服务器同步数据...');
+        logger.debug('📱 [应用初始化] 首次安装/数据库迁移 —— 历史消息改由 Agora Chat 提供，跳过旧后端历史回填');
         logger.debug('═══════════════════════════════════════════════════════════');
-        
-        // 通知UI开始同步
-        onSyncStatusChanged?.call(true, '同步数据中...');
-        
-        // 同步历史聊天消息，返回同步的消息数量
-        final syncedCount = await _syncHistoryMessages();
-        
-        // 同步收藏数据
+
+        // 🔵 阶段6：旧的“从后端 messages/group_messages 表回填本地 SQLite”链路已移除。
+        // 历史消息由 Agora Chat 承载（_loginAgoraChat 已预热会话/群缓存，进会话时按需拉取）。
+        onSyncStatusChanged?.call(true, '初始化中...');
+
+        // 仅同步收藏数据
         await _syncFavorites();
-        
-        // 通知UI同步完成
+
         onSyncStatusChanged?.call(false, null);
-        
-        // 只有在成功同步了消息后才标记为完成
-        if (syncedCount > 0) {
-          await Storage.saveFirstSyncCompleted(true);
-        }
+
+        // 直接标记首次同步完成，避免每次启动重复进入该分支
+        await Storage.saveFirstSyncCompleted(true);
       } else {
         // 非首次安装，只同步收藏数据（增量同步）
         await _syncFavorites();
@@ -76,6 +78,57 @@ class AppInitializationService {
     }
   }
   
+  /// 登录 Agora Chat（即时通讯）
+  Future<void> _loginAgoraChat() async {
+    try {
+      final token = await Storage.getToken();
+      final userId = await Storage.getUserId();
+      if (token == null || token.isEmpty || userId == null) {
+        logger.debug('💬 [应用初始化] 缺少 token/userId，跳过 Agora Chat 登录');
+        return;
+      }
+      logger.debug('💬 [应用初始化] 开始登录 Agora Chat... userId=$userId');
+      final ok = await AgoraChatService().loginFromBackend(
+        userId: userId,
+        authToken: token,
+      );
+      logger.debug('💬 [应用初始化] Agora Chat 登录${ok ? "成功" : "失败"}');
+
+      if (ok) {
+        // 阶段4：发布在线状态（Presence）
+        unawaited(AgoraChatService().publishPresence('online'));
+        // 启动全局消息→内存缓存同步（任何会话有新消息都同步进缓存，SDK 自动落本地库）
+        MobileChatPage.startGlobalCacheSync(currentUserId: userId);
+        // 🔵 登录成功后立即刷新一次会话列表（此时 Agora 已登录，1:1 会话可拉到）。
+        MobileChatListPage.needRefresh();
+        // 🚀 优化：先只做轻量的群ID映射登记（会话列表显示群会话所必需），
+        // 逐会话/逐群拉历史的重预热延后 5 秒执行，不与首屏加载争抢网络/DB。
+        unawaited(
+          MobileChatPage.preloadGroupsCache(
+            currentUserId: userId,
+            token: token,
+            preloadMessages: false, // 仅登记映射
+          )
+              // 🔵 群映射登记后刷新会话列表，确保群会话(依赖本地群ID映射)能正确显示。
+              .then((_) => MobileChatListPage.needRefresh()),
+        );
+        // 🚀 重预热延迟启动：预加载所有会话/群组最新 30 条到内存（进会话即从内存读）
+        unawaited(Future.delayed(const Duration(seconds: 5), () async {
+          await MobileChatPage.preloadAgoraConversationsCache(
+              currentUserId: userId);
+          await MobileChatPage.preloadGroupsCache(
+            currentUserId: userId,
+            token: token,
+          );
+          // 预热完成后再刷新一次，补全最后一条消息预览。
+          MobileChatListPage.needRefresh();
+        }));
+      }
+    } catch (e) {
+      logger.debug('💬 [应用初始化] Agora Chat 登录异常: $e');
+    }
+  }
+
   /// 检查是否是首次安装（本地数据库为空）
   Future<bool> _checkIsFirstInstall() async {
     try {
@@ -125,252 +178,9 @@ class AppInitializationService {
     }
   }
   
-  /// 从服务器同步历史聊天消息
-  /// 返回同步的消息总数
-  Future<int> _syncHistoryMessages() async {
-    try {
-      final token = await Storage.getToken();
-      final userId = await Storage.getUserId();
-      logger.debug('───────────────────────────────────────────────────────────');
-      logger.debug('📥 [历史消息同步] 开始同步...');
-      logger.debug('📥 [历史消息同步] Token: ${token != null ? "✅ 已获取 (${token.length}字符)" : "❌ 为空"}');
-      logger.debug('📥 [历史消息同步] 用户ID: $userId');
-      
-      if (token == null || userId == null) {
-        logger.debug('⚠️ [历史消息同步] 未登录，跳过历史消息同步');
-        return 0;
-      }
-      
-      // 1. 同步私聊历史消息
-      logger.debug('📥 [历史消息同步] 步骤1: 同步私聊消息...');
-      final privateCount = await _syncPrivateMessages(token, userId);
-      logger.debug('📥 [历史消息同步] 私聊消息同步完成: $privateCount 条');
-      
-      // 2. 同步群聊历史消息
-      logger.debug('📥 [历史消息同步] 步骤2: 同步群聊消息...');
-      final groupCount = await _syncGroupMessages(token, userId);
-      logger.debug('📥 [历史消息同步] 群聊消息同步完成: $groupCount 条');
-      
-      final totalCount = privateCount + groupCount;
-      logger.debug('───────────────────────────────────────────────────────────');
-      logger.debug('✅ [历史消息同步] 同步完成! 私聊: $privateCount 条, 群聊: $groupCount 条, 总计: $totalCount 条');
-      logger.debug('───────────────────────────────────────────────────────────');
-      return totalCount;
-    } catch (e) {
-      logger.debug('❌ [历史消息同步] 同步失败: $e');
-      return 0;
-    }
-  }
-  
-  /// 同步私聊历史消息
-  /// 返回同步的消息数量
-  Future<int> _syncPrivateMessages(String token, int userId) async {
-    try {
-      logger.debug('  ┌─────────────────────────────────────────────────────────');
-      logger.debug('  │ 📥 [私聊同步] 开始同步私聊历史消息...');
-      
-      // 先获取联系人列表
-      logger.debug('  │ 📥 [私聊同步] 获取联系人列表...');
-      final contactsResponse = await ApiService.getContacts(token: token);
-      logger.debug('  │ 📥 [私聊同步] API响应: code=${contactsResponse['code']}');
-      
-      if (contactsResponse['code'] != 0) {
-        logger.debug('  │ ⚠️ [私聊同步] 获取联系人列表失败: ${contactsResponse['message']}');
-        logger.debug('  └─────────────────────────────────────────────────────────');
-        return 0;
-      }
-      
-      final contacts = contactsResponse['data']?['contacts'] as List<dynamic>? ?? [];
-      logger.debug('  │ 📥 [私聊同步] 联系人数量: ${contacts.length}');
-      
-      int totalSavedCount = 0;
-      int contactIndex = 0;
-      for (var contact in contacts) {
-        contactIndex++;
-        final contactId = contact['friend_id'] as int? ?? contact['id'] as int?;
-        final contactName = contact['full_name'] ?? contact['username'] ?? '未知';
-        if (contactId == null) continue;
-        
-        // 获取与该联系人的消息历史
-        logger.debug('  │ 📥 [私聊同步] [$contactIndex/${contacts.length}] 同步联系人: $contactName (ID: $contactId)');
-        final response = await ApiService.getMessageHistoryFromServer(
-          token: token,
-          contactId: contactId,
-          page: 1,
-          pageSize: 100, // 每个联系人获取最近100条消息
-        );
-        
-        if (response['code'] != 0) {
-          logger.debug('  │ ⚠️ [私聊同步] 获取消息失败: ${response['message']}');
-          continue;
-        }
-        
-        final messages = response['data']?['messages'] as List<dynamic>? ?? [];
-        logger.debug('  │ 📥 [私聊同步] 服务器返回 ${messages.length} 条消息');
-        
-        int savedCount = 0;
-        for (var msg in messages) {
-          try {
-            final messageMap = _convertServerMessageToLocal(msg as Map<String, dynamic>, isGroup: false);
-            final id = await _localDb.insertMessage(messageMap, orIgnore: true);
-            if (id > 0) {
-              savedCount++;
-            }
-          } catch (e) {
-            logger.debug('  │ ⚠️ [私聊同步] 保存消息失败: $e');
-          }
-        }
-        
-        totalSavedCount += savedCount;
-        if (savedCount > 0) {
-          logger.debug('  │ ✅ [私聊同步] 联系人 $contactName 保存了 $savedCount 条消息');
-        }
-      }
-      
-      logger.debug('  │ ✅ [私聊同步] 完成! 共保存 $totalSavedCount 条私聊消息');
-      logger.debug('  └─────────────────────────────────────────────────────────');
-      return totalSavedCount;
-    } catch (e) {
-      logger.debug('  │ ❌ [私聊同步] 同步失败: $e');
-      logger.debug('  └─────────────────────────────────────────────────────────');
-      return 0;
-    }
-  }
-  
-  /// 同步群聊历史消息
-  /// 返回同步的消息数量
-  Future<int> _syncGroupMessages(String token, int userId) async {
-    try {
-      logger.debug('  ┌─────────────────────────────────────────────────────────');
-      logger.debug('  │ 📥 [群聊同步] 开始同步群聊历史消息...');
-      
-      // 先获取用户所属的群组列表
-      logger.debug('  │ 📥 [群聊同步] 获取用户所属群组列表...');
-      final groupsResponse = await ApiService.getUserGroups(token: token);
-      logger.debug('  │ 📥 [群聊同步] API响应: code=${groupsResponse['code']}');
-      
-      if (groupsResponse['code'] != 0) {
-        logger.debug('  │ ⚠️ [群聊同步] 获取群组列表失败: ${groupsResponse['message']}');
-        logger.debug('  └─────────────────────────────────────────────────────────');
-        return 0;
-      }
-      
-      final groups = groupsResponse['data']?['groups'] as List<dynamic>? ?? [];
-      logger.debug('  │ 📥 [群聊同步] 群组数量: ${groups.length}');
-      
-      int totalSavedCount = 0;
-      int groupIndex = 0;
-      for (var group in groups) {
-        groupIndex++;
-        final groupId = group['id'] as int?;
-        final groupName = group['name'] ?? '未知群组';
-        if (groupId == null) continue;
-        
-        // 获取该群组的历史消息
-        logger.debug('  │ 📥 [群聊同步] [$groupIndex/${groups.length}] 同步群组: $groupName (ID: $groupId)');
-        final response = await ApiService.getGroupMessagesFromServer(
-          token: token,
-          groupId: groupId,
-          page: 1,
-          pageSize: 200, // 每个群组获取最近200条消息
-        );
-        
-        if (response['code'] != 0) {
-          logger.debug('  │ ⚠️ [群聊同步] 获取消息失败: ${response['message']}');
-          continue;
-        }
-        
-        final messages = response['data']?['messages'] as List<dynamic>? ?? [];
-        logger.debug('  │ 📥 [群聊同步] 服务器返回 ${messages.length} 条消息');
-        
-        int savedCount = 0;
-        for (var msg in messages) {
-          try {
-            final messageMap = _convertServerMessageToLocal(msg as Map<String, dynamic>, isGroup: true);
-            final id = await _localDb.insertGroupMessage(messageMap, orIgnore: true);
-            if (id > 0) savedCount++;
-          } catch (e) {
-            logger.debug('  │ ⚠️ [群聊同步] 保存消息失败: $e');
-          }
-        }
-        
-        totalSavedCount += savedCount;
-        if (savedCount > 0) {
-          logger.debug('  │ ✅ [群聊同步] 群组 $groupName 保存了 $savedCount 条消息');
-        }
-      }
-      
-      logger.debug('  │ ✅ [群聊同步] 完成! 共保存 $totalSavedCount 条群聊消息');
-      logger.debug('  └─────────────────────────────────────────────────────────');
-      return totalSavedCount;
-    } catch (e) {
-      logger.debug('  │ ❌ [群聊同步] 同步失败: $e');
-      logger.debug('  └─────────────────────────────────────────────────────────');
-      return 0;
-    }
-  }
-  
-  /// 将服务器消息格式转换为本地数据库格式
-  /// 私聊消息表(messages)和群聊消息表(group_messages)的字段不同，需要分别处理
-  Map<String, dynamic> _convertServerMessageToLocal(Map<String, dynamic> serverMsg, {required bool isGroup}) {
-    if (isGroup) {
-      // 群聊消息表字段：server_id, group_id, sender_id, sender_name, sender_nickname, 
-      // sender_full_name, group_name, group_avatar, content, message_type, file_name,
-      // file_size, is_read, is_recalled, quoted_message_id, quoted_message_content, 
-      // status, created_at, sender_avatar, mentioned_user_ids, mentions, deleted_by_users, 
-      // call_type, channel_name, voice_duration
-      return {
-        'server_id': serverMsg['id'],
-        'group_id': serverMsg['group_id'],
-        'sender_id': serverMsg['sender_id'],
-        'sender_name': serverMsg['sender_name'] ?? '未知用户',
-        'sender_nickname': serverMsg['sender_nickname'],
-        'sender_full_name': serverMsg['sender_full_name'],
-        'group_name': serverMsg['group_name'],
-        'group_avatar': serverMsg['group_avatar'],
-        'content': serverMsg['content'] ?? '',
-        'message_type': serverMsg['message_type'] ?? 'text',
-        'file_name': serverMsg['file_name'],
-        'file_size': serverMsg['file_size'],
-        'is_read': (serverMsg['is_read'] == true || serverMsg['is_read'] == 1) ? 1 : 0,
-        'is_recalled': (serverMsg['is_recalled'] == true || serverMsg['is_recalled'] == 1) ? 1 : 0,
-        'quoted_message_id': serverMsg['quoted_message_id'],
-        'quoted_message_content': serverMsg['quoted_content'] ?? serverMsg['quoted_message_content'],
-        'status': 'sent',
-        'created_at': serverMsg['created_at'] ?? DateTime.now().toIso8601String(),
-        'sender_avatar': serverMsg['sender_avatar'],
-        'mentioned_user_ids': serverMsg['mentioned_user_ids'],
-        'mentions': serverMsg['mentions'],
-        'call_type': serverMsg['call_type'],
-        'channel_name': serverMsg['channel_name'],
-        'voice_duration': serverMsg['voice_duration'],
-      };
-    } else {
-      // 私聊消息表字段：server_id, sender_id, receiver_id, content, message_type,
-      // is_read, created_at, read_at, sender_name, receiver_name, file_name,
-      // quoted_message_id, quoted_message_content, status, deleted_by_users,
-      // sender_avatar, receiver_avatar, call_type, voice_duration
-      return {
-        'server_id': serverMsg['id'],
-        'sender_id': serverMsg['sender_id'],
-        'receiver_id': serverMsg['receiver_id'],
-        'content': serverMsg['content'] ?? '',
-        'message_type': serverMsg['message_type'] ?? 'text',
-        'is_read': (serverMsg['is_read'] == true || serverMsg['is_read'] == 1) ? 1 : 0,
-        'created_at': serverMsg['created_at'] ?? DateTime.now().toIso8601String(),
-        'sender_name': serverMsg['sender_name'],
-        'receiver_name': serverMsg['receiver_name'],
-        'file_name': serverMsg['file_name'],
-        'quoted_message_id': serverMsg['quoted_message_id'],
-        'quoted_message_content': serverMsg['quoted_content'] ?? serverMsg['quoted_message_content'],
-        'status': 'sent',
-        'sender_avatar': serverMsg['sender_avatar'],
-        'receiver_avatar': serverMsg['receiver_avatar'],
-        'call_type': serverMsg['call_type'],
-        'voice_duration': serverMsg['voice_duration'],
-      };
-    }
-  }
+  // 🔵 阶段6：旧的“从后端 messages/group_messages 历史回填本地 SQLite”方法
+  // (_syncHistoryMessages/_syncPrivateMessages/_syncGroupMessages/_convertServerMessageToLocal)
+  // 已删除——历史消息改由 Agora Chat 承载，不再读取已下线的消息表。
 
   /// 同步收藏数据
   Future<void> _syncFavorites() async {

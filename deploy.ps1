@@ -14,24 +14,24 @@ if (Test-Path $targetDataDir) {
     Write-Host "  - data directory does not exist, skipping" -ForegroundColor Gray
 }
 
-# Delete youdu.exe
-$targetExe = Join-Path $targetDir "youdu.exe"
+# Delete telegram.exe
+$targetExe = Join-Path $targetDir "telegram.exe"
 if (Test-Path $targetExe) {
     Write-Host "  - Deleting file: $targetExe" -ForegroundColor Gray
     Remove-Item -Path $targetExe -Force
-    Write-Host "  ✓ youdu.exe deleted" -ForegroundColor Green
+    Write-Host "  ✓ telegram.exe deleted" -ForegroundColor Green
 } else {
-    Write-Host "  - youdu.exe does not exist, skipping" -ForegroundColor Gray
+    Write-Host "  - telegram.exe does not exist, skipping" -ForegroundColor Gray
 }
 
-# Delete youdu.pdb
-$targetPdb = Join-Path $targetDir "youdu.pdb"
+# Delete telegram.pdb
+$targetPdb = Join-Path $targetDir "telegram.pdb"
 if (Test-Path $targetPdb) {
     Write-Host "  - Deleting file: $targetPdb" -ForegroundColor Gray
     Remove-Item -Path $targetPdb -Force
-    Write-Host "  ✓ youdu.pdb deleted" -ForegroundColor Green
+    Write-Host "  ✓ telegram.pdb deleted" -ForegroundColor Green
 } else {
-    Write-Host "  - youdu.pdb does not exist, skipping" -ForegroundColor Gray
+    Write-Host "  - telegram.pdb does not exist, skipping" -ForegroundColor Gray
 }
 
 Write-Host ""
@@ -55,22 +55,22 @@ if (Test-Path $sourceDataDir) {
     Write-Host "  ✗ Source data directory does not exist: $sourceDataDir" -ForegroundColor Red
 }
 
-# Copy youdu.exe
-$sourceExe = Join-Path $sourceDir "youdu.exe"
+# Copy telegram.exe
+$sourceExe = Join-Path $sourceDir "telegram.exe"
 if (Test-Path $sourceExe) {
-    Write-Host "  - Copying file: youdu.exe" -ForegroundColor Gray
+    Write-Host "  - Copying file: telegram.exe" -ForegroundColor Gray
     Copy-Item -Path $sourceExe -Destination $targetDir -Force
-    Write-Host "  ✓ youdu.exe copied" -ForegroundColor Green
+    Write-Host "  ✓ telegram.exe copied" -ForegroundColor Green
 } else {
     Write-Host "  ✗ Source file does not exist: $sourceExe" -ForegroundColor Red
 }
 
-# Copy youdu.pdb
-$sourcePdb = Join-Path $sourceDir "youdu.pdb"
+# Copy telegram.pdb
+$sourcePdb = Join-Path $sourceDir "telegram.pdb"
 if (Test-Path $sourcePdb) {
-    Write-Host "  - Copying file: youdu.pdb" -ForegroundColor Gray
+    Write-Host "  - Copying file: telegram.pdb" -ForegroundColor Gray
     Copy-Item -Path $sourcePdb -Destination $targetDir -Force
-    Write-Host "  ✓ youdu.pdb copied" -ForegroundColor Green
+    Write-Host "  ✓ telegram.pdb copied" -ForegroundColor Green
 } else {
     Write-Host "  ✗ Source file does not exist: $sourcePdb" -ForegroundColor Red
 }

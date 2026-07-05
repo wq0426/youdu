@@ -6,6 +6,7 @@ import '../services/api_service.dart';
 import '../services/websocket_service.dart';
 import '../utils/logger.dart';
 import '../utils/storage.dart';
+import '../pages/mobile_home_page.dart';
 
 /// 转发消息弹窗 - 用于选择转发目标
 class ForwardMessageDialog extends StatefulWidget {
@@ -78,11 +79,13 @@ class _ForwardMessageDialogState extends State<ForwardMessageDialog> {
               if (data is Map && data['contacts'] != null) {
                 _contacts = (data['contacts'] as List)
                     .map((json) => ContactModel.fromJson(json))
+                    .where((c) => c.isApproved && !c.isDeleted)
                     .toList();
               } else if (data is List) {
                 // 如果直接是 List
                 _contacts = data
                     .map((json) => ContactModel.fromJson(json))
+                    .where((c) => c.isApproved && !c.isDeleted)
                     .toList();
               }
             }
@@ -161,6 +164,7 @@ class _ForwardMessageDialogState extends State<ForwardMessageDialog> {
       for (final target in _selectedTargets) {
         final isGroup = target.startsWith('group_');
         final targetId = int.parse(target.split('_')[1]);
+        int targetSuccess = 0;
 
         // 逐条转发消息
         for (final message in widget.messages) {
@@ -186,10 +190,18 @@ class _ForwardMessageDialogState extends State<ForwardMessageDialog> {
 
           if (success) {
             successCount++;
+            targetSuccess++;
           }
 
           // 添加小延迟，避免发送过快
           await Future.delayed(const Duration(milliseconds: 100));
+        }
+
+        // 🔵 该目标至少成功转发一条 → 更新发送方会话列表：
+        // 自己发出的消息不会回流到 messageStream，需主动更新。复用退出聊天页时验证可靠的
+        // _updateSingleContact（读 Agora 最新消息）：已存在→更新最新消息并置顶，不存在→重新加载新建。
+        if (targetSuccess > 0) {
+          MobileHomePage.updateConversationOnOutgoing(targetId, isGroup: isGroup);
         }
       }
 

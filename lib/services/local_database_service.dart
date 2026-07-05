@@ -42,14 +42,17 @@ class LocalDatabaseService {
   // 移动端密钥存储
   static const String _keyStorageKey = 'ydkey';
   static const String _uuidStorageKey = 'ydkey_uuid'; // 存储UUID的key
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
+    // macOS 无开发者证书(ad-hoc 签名)时数据保护钥匙串会报 -34018，改用传统登录钥匙串
+    mOptions: MacOsOptions(useDataProtectionKeyChain: false),
+  );
   
   // 🔥 测试开关：是否在移动端启动时删除重建数据库
   // ⚠️  警告：开启后每次启动都会清空所有数据！仅用于测试！
   static const bool _forceRecreateDatabase = false; // 设为 false 可禁用此功能
   
   // iOS 备份排除 Method Channel
-  static const MethodChannel _backupChannel = MethodChannel('com.youdu.app/backup');
+  static const MethodChannel _backupChannel = MethodChannel('com.telegram.app/backup');
 
   /// 将文件排除出 iCloud 备份（仅 iOS）
   Future<void> _excludeFromiCloudBackup(String path) async {
@@ -371,7 +374,7 @@ class LocalDatabaseService {
       if (!kIsWeb && _isDesktopPlatform) {
         final localAppData = Platform.environment['LOCALAPPDATA'];
         if (localAppData != null) {
-          final dbFilePath = join(localAppData, 'ydapp', 'youdu_local_storage.db');
+          final dbFilePath = join(localAppData, 'ydapp', 'telegram_local_storage.db');
           final dbFile = File(dbFilePath);
           shouldPushToServer = !dbFile.existsSync();
           logger.debug('🔍 [数据库文件检查] 文件${shouldPushToServer ? "不存在" : "已存在"}: $dbFilePath');
@@ -380,7 +383,7 @@ class LocalDatabaseService {
         // 移动端：检查数据库文件是否存在
         try {
           final dbPath = await getDatabasesPath();
-          final dbFilePath = join(dbPath, 'youdu_local_storage.db');
+          final dbFilePath = join(dbPath, 'telegram_local_storage.db');
           final dbFile = File(dbFilePath);
           shouldPushToServer = !dbFile.existsSync();
           logger.debug('🔍 [数据库文件检查] 文件${shouldPushToServer ? "不存在" : "已存在"}: $dbFilePath');
@@ -538,11 +541,12 @@ class LocalDatabaseService {
         );
         logger.debug('✅ SQLCipher DLL 加载成功');
       } else if (Platform.isMacOS) {
-        // macOS: 查找 libsqlcipher.dylib
-        logger.debug('📚 加载 SQLCipher (macOS)');
+        // macOS: SQLCipher 由 CocoaPods 静态链接进 App 二进制（Podfile.lock 里的 SQLCipher pod），
+        // 磁盘上没有独立的 libsqlcipher.dylib，必须用 process() 从当前进程解析符号
+        logger.debug('📚 加载 SQLCipher (macOS, 静态链接)');
         sqlite3_open.open.overrideFor(
           sqlite3_open.OperatingSystem.macOS,
-          () => ffi.DynamicLibrary.open('libsqlcipher.dylib'),
+          () => ffi.DynamicLibrary.process(),
         );
         logger.debug('✅ SQLCipher 配置成功 (macOS)');
       } else if (Platform.isLinux) {
@@ -588,6 +592,14 @@ class LocalDatabaseService {
       
       // 3. 设置加密密钥（16位密钥）
       _sqlite3Db!.execute("PRAGMA key = '$databaseEncryptoStr';");
+      // 校验 SQLCipher 是否真正生效：普通 SQLite 下 cipher_version 返回空，
+      // PRAGMA key 会静默无效，数据将以明文落盘，必须及时暴露
+      final cipherRows = _sqlite3Db!.select('PRAGMA cipher_version;');
+      if (cipherRows.isEmpty) {
+        logger.error('❌ SQLCipher 未生效（cipher_version 为空），数据库将不加密！');
+      } else {
+        logger.debug('🔐 SQLCipher 版本: ${cipherRows.first.values.first}');
+      }
       // 5. 如果是新数据库，创建表结构
       if (!dbExists) {
         logger.debug('📝 创建新数据库表结构...');
@@ -893,7 +905,7 @@ class LocalDatabaseService {
           }
         } else {
           final appDocDir = await getApplicationDocumentsDirectory();
-          dbDirPath = join(appDocDir.path, 'youdu_db');
+          dbDirPath = join(appDocDir.path, 'telegram_db');
         }
 
         final dbDir = Directory(dbDirPath);
@@ -901,14 +913,14 @@ class LocalDatabaseService {
           await dbDir.create(recursive: true);
           isNew = true;
         }
-        path = join(dbDir.path, 'youdu_local_storage.db');
+        path = join(dbDir.path, 'telegram_local_storage.db');
         
         // 🔴 删除旧数据库文件
         await _deleteOldDatabases(dbDir.path);
       } else {
         // 移动端路径（Android/iOS）
         final dbPath = await getDatabasesPath();
-        path = join(dbPath, 'youdu_local_storage.db');
+        path = join(dbPath, 'telegram_local_storage.db');
         
         // 🔴 删除旧数据库文件
         await _deleteOldDatabases(dbPath);
@@ -2029,7 +2041,16 @@ class LocalDatabaseService {
         whereArgs: [userId, 'group'],
       );
       updatedCount += receiverResult;
-      
+
+      // 更新该用户在群聊中作为发送者的消息（group_messages 表只有 sender_avatar）
+      final groupSenderResult = await _executeUpdate(
+        'group_messages',
+        {'sender_avatar': newAvatar},
+        where: 'sender_id = ?',
+        whereArgs: [userId],
+      );
+      updatedCount += groupSenderResult;
+
       return updatedCount;
     } catch (e) {
       logger.debug('❌ 数据库头像更新失败: $e');

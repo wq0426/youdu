@@ -36,7 +36,7 @@ echo Step 1/3: Delete Application Data Directories
 echo --------------------------------------------
 
 set DB_PATH1=%LOCALAPPDATA%\ydapp
-set DB_PATH2=%USERPROFILE%\Documents\youdu_db
+set DB_PATH2=%USERPROFILE%\Documents\telegram_db
 set DELETED_COUNT=0
 
 if exist "%DB_PATH1%" (
@@ -177,10 +177,10 @@ echo    2. Restart the application (will trigger UUID push)
 echo        flutter run -d windows --debug
 echo.
 echo    3. Check logs to confirm UUID push success
-echo        Client logs: logs\youdu_XX_YYYY-MM-DD.log
+echo        Client logs: logs\telegram_XX_YYYY-MM-DD.log
 echo        Search keywords: 'old version upgrade detected' or 'device info push success'
 echo.
-echo        Server logs: server\logs\youdu-server_YYYY-MM-DD.log
+echo        Server logs: server\logs\telegram-server_YYYY-MM-DD.log
 echo        Search keywords: '[device registration]' or 'registration success'
 echo.
 echo    4. Verify database records

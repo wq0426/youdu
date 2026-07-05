@@ -19,11 +19,11 @@ run:
 
 # 构建可执行文件
 build:
-	go build -o youdu-server main.go
+	go build -o telegram-server main.go
 
 # 清理构建文件
 clean:
-	rm -f youdu-server youdu-server.exe
+	rm -f telegram-server telegram-server.exe
 
 # 运行测试
 test:
@@ -57,5 +57,5 @@ docker-logs:
 
 # 重启 Docker 容器
 docker-restart:
-	docker-compose restart youdu-server
+	docker-compose restart telegram-server
 

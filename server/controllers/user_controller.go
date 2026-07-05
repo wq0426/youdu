@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"

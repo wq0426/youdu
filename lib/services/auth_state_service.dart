@@ -4,6 +4,8 @@ import 'package:flutter/scheduler.dart';
 import '../utils/logger.dart';
 import '../utils/storage.dart';
 import 'websocket_service.dart';
+import 'agora_chat_service.dart';
+import '../pages/mobile_chat_page.dart';
 
 /// 全局认证状态服务
 /// 用于处理token失效、强制登出等认证相关的全局状态
@@ -44,6 +46,13 @@ class AuthStateService {
 
       // 断开WebSocket连接
       await wsService.disconnect();
+
+      // 登出 Agora Chat（即时通讯）
+      await AgoraChatService().logout();
+
+      // 停止全局缓存同步并清空内存缓存（避免订阅泄漏 / 跨账号串味）
+      MobileChatPage.stopGlobalCacheSync();
+      MobileChatPage.clearAllCache();
 
       // 清除本地存储的token
       await Storage.clearToken();

@@ -8,11 +8,11 @@
 //
 // Windows平台:
 //
-//	go run publish_version.go -platform windows -version 1.2.4-1769357648 -url "https://yoududown.cc:443/releases/windows/Youdu-1.2.4-1769357648.exe" -file "C:\Users\WIN10\source\flutter\chat\youdu2\install\YouduInstaller\publish\Youdu-1.2.4-1769357648.exe" -notes "优化APP"
+//	go run publish_version.go -platform windows -version 1.2.4-1769357648 -url "https://yoududown.cc:443/releases/windows/Telegram-1.2.4-1769357648.exe" -file "C:\Users\WIN10\source\flutter\chat\youdu2\install\TelegramInstaller\publish\Telegram-1.2.4-1769357648.exe" -notes "优化APP"
 //
 // Android平台:
 //
-//	go run publish_version.go -platform android -version 1.2.4-1769357648 -url "https://yoududown.cc:443/releases/android/Youdu-1.2.4-1769357648.apk" -file "C:\Users\WIN10\source\flutter\chat\youdu2\build\app\outputs\flutter-apk\Youdu-1.2.4-1769357648.apk" -notes "优化APP"
+//	go run publish_version.go -platform android -version 1.2.4-1769357648 -url "https://yoududown.cc:443/releases/android/Telegram-1.2.4-1769357648.apk" -file "C:\Users\WIN10\source\flutter\chat\youdu2\build\app\outputs\flutter-apk\Telegram-1.2.4-1769357648.apk" -notes "优化APP"
 package main
 
 import (

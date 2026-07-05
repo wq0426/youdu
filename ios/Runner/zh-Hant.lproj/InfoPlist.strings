@@ -1,6 +1,6 @@
 /* 繁体中文本地化 */
-"CFBundleDisplayName" = "有度";
-"CFBundleName" = "有度";
+"CFBundleDisplayName" = "Telegram";
+"CFBundleName" = "Telegram";
 "NSCameraUsageDescription" = "需要訪問攝像頭進行拍照和視頻通話";
 "NSMicrophoneUsageDescription" = "需要訪問麥克風進行語音/視頻通話";
 "NSPhotoLibraryUsageDescription" = "需要訪問相冊來選擇和保存圖片";

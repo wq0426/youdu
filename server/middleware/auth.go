@@ -4,9 +4,9 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/utils"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/utils"
 )
 
 // AuthMiddleware JWT认证中间件

@@ -8,16 +8,16 @@ set "DEBUG_DIR=C:\Users\WIN10\source\flutter\chat\youdu2\build\windows\x64\runne
 
 echo [1] 检查解压后的Release版本
 echo 目录: %RELEASE_DIR%
-if exist "%RELEASE_DIR%\youdu.exe" (
-    echo ✓ youdu.exe 存在
+if exist "%RELEASE_DIR%\telegram.exe" (
+    echo ✓ telegram.exe 存在
     echo.
     echo 文件信息:
-    powershell -Command "Get-Item '%RELEASE_DIR%\youdu.exe' | Select-Object Name, Length, LastWriteTime | Format-List"
+    powershell -Command "Get-Item '%RELEASE_DIR%\telegram.exe' | Select-Object Name, Length, LastWriteTime | Format-List"
     echo.
     echo 版本信息:
-    powershell -Command "(Get-Item '%RELEASE_DIR%\youdu.exe').VersionInfo | Select-Object ProductVersion, FileVersion | Format-List"
+    powershell -Command "(Get-Item '%RELEASE_DIR%\telegram.exe').VersionInfo | Select-Object ProductVersion, FileVersion | Format-List"
 ) else (
-    echo ✗ youdu.exe 不存在
+    echo ✗ telegram.exe 不存在
 )
 
 echo.
@@ -26,16 +26,16 @@ echo.
 
 echo [2] 检查当前运行的Debug版本
 echo 目录: %DEBUG_DIR%
-if exist "%DEBUG_DIR%\youdu.exe" (
-    echo ✓ youdu.exe 存在
+if exist "%DEBUG_DIR%\telegram.exe" (
+    echo ✓ telegram.exe 存在
     echo.
     echo 文件信息:
-    powershell -Command "Get-Item '%DEBUG_DIR%\youdu.exe' | Select-Object Name, Length, LastWriteTime | Format-List"
+    powershell -Command "Get-Item '%DEBUG_DIR%\telegram.exe' | Select-Object Name, Length, LastWriteTime | Format-List"
     echo.
     echo 版本信息:
-    powershell -Command "(Get-Item '%DEBUG_DIR%\youdu.exe').VersionInfo | Select-Object ProductVersion, FileVersion | Format-List"
+    powershell -Command "(Get-Item '%DEBUG_DIR%\telegram.exe').VersionInfo | Select-Object ProductVersion, FileVersion | Format-List"
 ) else (
-    echo ✗ youdu.exe 不存在
+    echo ✗ telegram.exe 不存在
 )
 
 echo.
@@ -44,13 +44,13 @@ echo.
 
 echo [3] 对比文件大小和修改时间
 echo.
-if exist "%RELEASE_DIR%\youdu.exe" (
-    if exist "%DEBUG_DIR%\youdu.exe" (
+if exist "%RELEASE_DIR%\telegram.exe" (
+    if exist "%DEBUG_DIR%\telegram.exe" (
         echo Release版本:
-        dir "%RELEASE_DIR%\youdu.exe" | findstr "youdu.exe"
+        dir "%RELEASE_DIR%\telegram.exe" | findstr "telegram.exe"
         echo.
         echo Debug版本:
-        dir "%DEBUG_DIR%\youdu.exe" | findstr "youdu.exe"
+        dir "%DEBUG_DIR%\telegram.exe" | findstr "telegram.exe"
         echo.
         echo 💡 提示:
         echo   - Release版本通常比Debug版本小很多

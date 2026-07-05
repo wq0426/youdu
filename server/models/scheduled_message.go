@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"time"
 
-	"youdu-server/db"
+	"telegram-server/db"
 )
 
 // ScheduledMessageType 定时消息类型

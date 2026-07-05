@@ -12,7 +12,7 @@ class VersionPersistenceService {
   VersionPersistenceService._internal();
 
   /// 获取版本信息文件路径
-  /// PC端：用户文档目录/youdu/version.json
+  /// PC端：用户文档目录/telegram/version.json
   /// 移动端：应用文档目录/version.json
   Future<String> _getVersionFilePath() async {
     String dirPath;
@@ -20,17 +20,17 @@ class VersionPersistenceService {
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
       // PC端：使用用户文档目录，不会被应用升级删除
       if (Platform.isWindows) {
-        // Windows: C:\Users\<user>\Documents\youdu\version.json
+        // Windows: C:\Users\<user>\Documents\telegram\version.json
         final userProfile = Platform.environment['USERPROFILE'] ?? '';
-        dirPath = path.join(userProfile, 'Documents', 'youdu');
+        dirPath = path.join(userProfile, 'Documents', 'telegram');
       } else if (Platform.isMacOS) {
-        // macOS: ~/Library/Application Support/youdu/version.json
+        // macOS: ~/Library/Application Support/telegram/version.json
         final home = Platform.environment['HOME'] ?? '';
-        dirPath = path.join(home, 'Library', 'Application Support', 'youdu');
+        dirPath = path.join(home, 'Library', 'Application Support', 'telegram');
       } else {
-        // Linux: ~/.config/youdu/version.json
+        // Linux: ~/.config/telegram/version.json
         final home = Platform.environment['HOME'] ?? '';
-        dirPath = path.join(home, '.config', 'youdu');
+        dirPath = path.join(home, '.config', 'telegram');
       }
     } else {
       // 移动端：使用应用文档目录

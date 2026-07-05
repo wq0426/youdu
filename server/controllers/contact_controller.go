@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/services"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 
 	"github.com/gin-gonic/gin"
 )
@@ -517,12 +518,14 @@ func (ctrl *ContactController) UpdateContactApprovalStatus(c *gin.Context) {
 		utils.LogDebug("当前用户ID（审核人）: %d", currentUserID.(int))
 		utils.LogDebug("当前用户信息: ID=%d, Username=%s", currentUser.ID, currentUser.Username)
 
+		// 🔵 顺序很重要：先以「发起人」身份代发「发起添加好友申请」，再以「审核人」身份回「请求添加好友【已通过】」。
+		// 两条消息在同一会话里按时间戳排序，先发的时间戳更早；这样双方会话显示顺序才符合逻辑：
+		// 「发起添加好友申请」在前、「请求添加好友【已通过】」在后。
+		// （此条同时确保审核人的会话列表中也能显示新好友，并代表发起人当初的"申请"动作）
+		ctrl.sendApprovalMessageToSelf(currentUserID.(int), currentUser, initiator, "approved")
+
 		// 向发起人发送【已通过】消息
 		ctrl.sendApprovalMessage(relation.UserID, currentUser, initiator, "approved")
-
-		// 🔴 修复：向审核人自己发送消息，确保审核人的会话列表中也能显示新好友
-		// 因为审核人发送给发起人的消息只会出现在发起人的会话列表中，审核人需要单独的消息来创建会话
-		ctrl.sendApprovalMessageToSelf(currentUserID.(int), currentUser, initiator, "approved")
 
 		// 向双方发送联系人状态变更通知，触发APP端更新通讯录缓存
 		ctrl.sendContactStatusChangeNotification(relation.UserID, currentUserID.(int), "approved", initiator, currentUser)
@@ -556,16 +559,8 @@ func (ctrl *ContactController) sendApprovalMessage(initiatorID int, approver *mo
 
 	utils.LogDebug("准备向发起人发送审核消息: 发起人ID=%d, 审核人=%s, 状态=%s", initiatorID, approver.Username, approvalStatus)
 
-	// 先将消息保存到数据库
-	// 🔴 使用 UTC 时间，因为数据库字段是 timestamp without time zone
-	// 存入 UTC 时间后，客户端收到带 Z 后缀的时间会正确转换为本地时间
-	currentTime := time.Now().UTC()
-	query := `
-		INSERT INTO messages (sender_id, receiver_id, sender_name, receiver_name, sender_avatar, receiver_avatar, content, message_type, status, deleted_by_users, is_read, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'normal', '', false, $9)
-		RETURNING id
-	`
-	var messageID int64
+	// 迁移到 Agora Chat：不再写入 messages 表，改为以审核人身份通过 Agora Chat REST 向发起人代发文本消息。
+	// 代发的消息持久化进 Agora 会话并支持离线投递，双方客户端均通过 onMessagesReceived 收到并刷新会话列表。
 	// 优先使用 full_name，如果为空则使用 username
 	approverName := approver.Username
 	if approver.FullName != nil && *approver.FullName != "" {
@@ -577,64 +572,30 @@ func (ctrl *ContactController) sendApprovalMessage(initiatorID int, approver *mo
 		initiatorName = *initiator.FullName
 	}
 
-	err := db.DB.QueryRow(
-		query,
-		approver.ID,      // sender_id: 审核人ID（发送消息的人）
-		initiatorID,      // receiver_id: 发起人ID（接收消息的人）
-		approverName,     // sender_name: 审核人姓名
-		initiatorName,    // receiver_name: 发起人姓名
-		approver.Avatar,  // sender_avatar: 审核人头像
-		initiator.Avatar, // receiver_avatar: 发起人头像
-		systemMessage,    // content: 消息内容
-		"text",
-		currentTime,
-	).Scan(&messageID)
+	ext := map[string]interface{}{
+		"sender_name":     approverName,
+		"sender_avatar":   approver.Avatar,
+		"receiver_name":   initiatorName,
+		"receiver_avatar": initiator.Avatar,
+		"message_type":    "text",
+	}
 
-	if err != nil {
-		utils.LogDebug("❌ 保存审核消息失败: %v", err)
+	if err := services.AgoraChatGroup.SendUserText(approver.ID, initiatorID, systemMessage, ext); err != nil {
+		utils.LogDebug("❌ 代发审核消息(Agora)失败: %v", err)
 		return
 	}
-	utils.LogDebug("✅ 审核消息已保存到数据库，消息ID: %d", messageID)
-
-	// 构造WebSocket消息，包含消息ID
-	wsMessage := models.WSMessage{
-		Type:       "message",
-		ReceiverID: initiatorID,
-		Data: models.WSMessageData{
-			ID:           int(messageID),
-			SenderID:     approver.ID,
-			ReceiverID:   initiatorID,
-			SenderName:   approver.Username,
-			ReceiverName: initiator.Username,
-			Content:      systemMessage,
-			MessageType:  "text",
-			IsRead:       false,
-			CreatedAt:    currentTime,
-		},
-	}
-
-	// 将消息序列化为JSON
-	messageJSON, err := json.Marshal(wsMessage)
-	if err != nil {
-		utils.LogDebug("❌ 序列化消息失败: %v", err)
-		return
-	}
-
-	// 通过WebSocket发送消息
-	if ctrl.hub != nil {
-		ctrl.hub.SendToUser(initiatorID, messageJSON)
-		utils.LogDebug("✅ 已向发起人 %d 发送审核消息: %s", initiatorID, systemMessage)
-	} else {
-		utils.LogDebug("❌ WebSocket Hub未初始化，无法发送消息")
-	}
+	utils.LogDebug("✅ 已向发起人 %d 代发审核消息(Agora): %s", initiatorID, systemMessage)
 }
 
 // sendApprovalMessageToSelf 向审核人自己发送审核消息（显示在自己的最近联系人列表中）
 func (ctrl *ContactController) sendApprovalMessageToSelf(approverID int, approver *models.User, initiator *models.User, approvalStatus string) {
 	// 根据审核状态构造系统消息
+	// 注意：本条消息以「发起人」身份代发给审核人，代表发起人当初的申请动作，
+	// 因此文案为「发起添加好友申请」；审核人收到/通过后由 sendApprovalMessage
+	// 以审核人身份回复「请求添加好友【已通过】」。两条文案需区分，避免双方都显示「已通过」。
 	var systemMessage string
 	if approvalStatus == "approved" {
-		systemMessage = "请求添加好友【已通过】"
+		systemMessage = "发起添加好友申请"
 	} else {
 		utils.LogDebug("❌ 仅通过状态才向审核人自己发送消息")
 		return
@@ -642,15 +603,8 @@ func (ctrl *ContactController) sendApprovalMessageToSelf(approverID int, approve
 
 	utils.LogDebug("准备向审核人自己发送审核消息: 审核人ID=%d, 发起人=%s", approverID, initiator.Username)
 
-	// 先将消息保存到数据库（注意：这里发送方和接收方都是审核人自己，但消息内容关联的是发起人）
-	// 🔴 使用 UTC 时间，因为数据库字段是 timestamp without time zone
-	currentTime := time.Now().UTC()
-	query := `
-		INSERT INTO messages (sender_id, receiver_id, sender_name, receiver_name, sender_avatar, receiver_avatar, content, message_type, status, deleted_by_users, is_read, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'normal', '', false, $9)
-		RETURNING id
-	`
-	var messageID int64
+	// 迁移到 Agora Chat：不再写入 messages 表，改为以发起人身份通过 Agora Chat REST 向审核人代发文本消息，
+	// 使审核人的会话列表也能出现与新好友（发起人）的会话。
 	// 优先使用 full_name，如果为空则使用 username
 	initiatorName := initiator.Username
 	if initiator.FullName != nil && *initiator.FullName != "" {
@@ -662,56 +616,19 @@ func (ctrl *ContactController) sendApprovalMessageToSelf(approverID int, approve
 		approverName = *approver.FullName
 	}
 
-	err := db.DB.QueryRow(
-		query,
-		initiator.ID,
-		approverID,
-		initiatorName,
-		approverName,
-		initiator.Avatar,
-		approver.Avatar,
-		systemMessage,
-		"text",
-		currentTime,
-	).Scan(&messageID)
+	ext := map[string]interface{}{
+		"sender_name":     initiatorName,
+		"sender_avatar":   initiator.Avatar,
+		"receiver_name":   approverName,
+		"receiver_avatar": approver.Avatar,
+		"message_type":    "text",
+	}
 
-	if err != nil {
-		utils.LogDebug("❌ 保存审核人自己的消息失败: %v", err)
+	if err := services.AgoraChatGroup.SendUserText(initiator.ID, approverID, systemMessage, ext); err != nil {
+		utils.LogDebug("❌ 代发审核人自己的消息(Agora)失败: %v", err)
 		return
 	}
-	utils.LogDebug("✅ 审核人自己的消息已保存到数据库，消息ID: %d", messageID)
-
-	// 构造WebSocket消息，包含消息ID
-	wsMessage := models.WSMessage{
-		Type:       "message",
-		ReceiverID: approverID,
-		Data: models.WSMessageData{
-			ID:           int(messageID),
-			SenderID:     initiator.ID,
-			ReceiverID:   approverID,
-			SenderName:   initiatorName,
-			ReceiverName: approverName,
-			Content:      systemMessage,
-			MessageType:  "text",
-			IsRead:       false,
-			CreatedAt:    currentTime,
-		},
-	}
-
-	// 将消息序列化为JSON
-	messageJSON, err := json.Marshal(wsMessage)
-	if err != nil {
-		utils.LogDebug("❌ 序列化消息失败: %v", err)
-		return
-	}
-
-	// 通过WebSocket发送消息
-	if ctrl.hub != nil {
-		ctrl.hub.SendToUser(approverID, messageJSON)
-		utils.LogDebug("✅ 已向审核人自己 %d 发送审核消息: %s", approverID, systemMessage)
-	} else {
-		utils.LogDebug("❌ WebSocket Hub未初始化，无法发送消息")
-	}
+	utils.LogDebug("✅ 已向审核人自己 %d 代发审核消息(Agora): %s", approverID, systemMessage)
 }
 
 // sendContactRequestNotification 向接收方发送联系人请求通知

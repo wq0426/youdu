@@ -6,13 +6,14 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chewie/chewie.dart';
-import 'package:youdu/models/favorite_model.dart';
-import 'package:youdu/services/api_service.dart';
-import 'package:youdu/utils/storage.dart';
-import 'package:youdu/utils/emoji_text_span_builder.dart';
-import 'package:youdu/utils/logger.dart';
-import 'package:youdu/utils/mobile_storage_permission_helper.dart';
-import 'package:youdu/utils/app_localizations.dart';
+import 'package:telegram/models/favorite_model.dart';
+import 'package:telegram/services/api_service.dart';
+import 'package:telegram/utils/storage.dart';
+import 'package:telegram/utils/emoji_text_span_builder.dart';
+import 'package:telegram/utils/logger.dart';
+import 'package:telegram/utils/mobile_storage_permission_helper.dart';
+import 'package:telegram/utils/app_localizations.dart';
+import '../theme/app_theme.dart';
 
 /// 移动端收藏页面
 class MobileFavoritesPage extends StatefulWidget {
@@ -176,8 +177,9 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
   @override
   Widget build(BuildContext context) {
     final i18n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: c.scaffold,
       appBar: AppBar(
         backgroundColor: const Color(0xFF4A90E2),
         elevation: 0,
@@ -215,9 +217,9 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.error_outline, size: 64, color: Colors.grey),
+                  Icon(Icons.error_outline, size: 64, color: c.secondaryText),
                   const SizedBox(height: 16),
-                  Text(_error!, style: const TextStyle(color: Colors.grey)),
+                  Text(_error!, style: TextStyle(color: c.secondaryText)),
                   const SizedBox(height: 16),
                   ElevatedButton(
                     onPressed: () => _loadFavorites(page: _currentPage),
@@ -234,11 +236,11 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.star_border, size: 80, color: Colors.grey),
+                  Icon(Icons.star_border, size: 80, color: c.secondaryText),
                   const SizedBox(height: 16),
                   Text(
                     i18n.translate('no_favorites'),
-                    style: const TextStyle(color: Colors.grey, fontSize: 16),
+                    style: TextStyle(color: c.secondaryText, fontSize: 16),
                   ),
                 ],
               ),
@@ -267,6 +269,7 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
   // 构建收藏项
   Widget _buildFavoriteItem(FavoriteModel favorite) {
     final bool isMerged = favorite.messageType == 'merged';
+    final c = AppColors.of(context);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -345,13 +348,13 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
                               Icon(
                                 Icons.image,
                                 size: 16,
-                                color: Colors.grey[600],
+                                color: c.secondaryText,
                               ),
                               const SizedBox(width: 4),
                               Text(
                                 '[图片]',
                                 style: TextStyle(
-                                  color: Colors.grey[600],
+                                  color: c.secondaryText,
                                   fontSize: 14,
                                 ),
                               ),
@@ -363,14 +366,14 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
                               Icon(
                                 _getFileIcon(favorite.fileName),
                                 size: 16,
-                                color: Colors.grey[600],
+                                color: c.secondaryText,
                               ),
                               const SizedBox(width: 4),
                               Expanded(
                                 child: Text(
                                   '[文件] ${favorite.fileName ?? "未知文件"}',
                                   style: TextStyle(
-                                    color: Colors.grey[600],
+                                    color: c.secondaryText,
                                     fontSize: 14,
                                   ),
                                   maxLines: 1,
@@ -385,13 +388,13 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
                               Icon(
                                 Icons.videocam,
                                 size: 16,
-                                color: Colors.grey[600],
+                                color: c.secondaryText,
                               ),
                               const SizedBox(width: 4),
                               Text(
                                 '[视频]',
                                 style: TextStyle(
-                                  color: Colors.grey[600],
+                                  color: c.secondaryText,
                                   fontSize: 14,
                                 ),
                               ),
@@ -405,21 +408,21 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 14,
-                              color: Colors.grey[700],
+                              color: c.secondaryText,
                             ),
                           ),
                     const SizedBox(height: 6),
                     // 时间
                     Text(
                       _formatTime(favorite.createdAt),
-                      style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                      style: TextStyle(fontSize: 12, color: c.secondaryText),
                     ),
                   ],
                 ),
               ),
               // 删除按钮
               IconButton(
-                icon: Icon(Icons.delete_outline, color: Colors.grey[400]),
+                icon: Icon(Icons.delete_outline, color: c.secondaryText),
                 onPressed: () {
                   // 确认删除
                   showDialog(
@@ -458,10 +461,11 @@ class _MobileFavoritesPageState extends State<MobileFavoritesPage> {
 
   // 构建分页控件
   Widget _buildPagination() {
+    final c = AppColors.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: c.surface,
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.05),
@@ -523,8 +527,9 @@ class _MergedMessageDetailPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = AppColors.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
+      backgroundColor: c.scaffold,
       appBar: AppBar(
         backgroundColor: const Color(0xFF4A90E2),
         elevation: 0,
@@ -539,13 +544,14 @@ class _MergedMessageDetailPage extends StatelessWidget {
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
-        child: _buildChatContent(),
+        child: _buildChatContent(context),
       ),
     );
   }
 
   // 构建聊天内容
-  Widget _buildChatContent() {
+  Widget _buildChatContent(BuildContext context) {
+    final c = AppColors.of(context);
     final lines = favorite.content.split('\n');
     final List<Widget> chatWidgets = [];
     final Set<String> senders = {};
@@ -573,10 +579,10 @@ class _MergedMessageDetailPage extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 16),
             child: Text(
               line,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF666666),
+                color: c.secondaryText,
               ),
               textAlign: TextAlign.center,
             ),
@@ -599,7 +605,9 @@ class _MergedMessageDetailPage extends StatelessWidget {
           i++;
         }
         final bool isLeft = (sender == leftSender);
-        chatWidgets.add(_buildMessageBubble(time, sender, content, isLeft));
+        chatWidgets.add(
+          _buildMessageBubble(context, time, sender, content, isLeft),
+        );
       }
     }
 
@@ -611,11 +619,13 @@ class _MergedMessageDetailPage extends StatelessWidget {
 
   // 构建消息气泡
   Widget _buildMessageBubble(
+    BuildContext context,
     String time,
     String sender,
     String content,
     bool isLeft,
   ) {
+    final c = AppColors.of(context);
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       child: Row(
@@ -642,9 +652,9 @@ class _MergedMessageDetailPage extends StatelessWidget {
                       if (!isLeft) ...[
                         Text(
                           time,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 11,
-                            color: Color(0xFF999999),
+                            color: c.secondaryText,
                           ),
                         ),
                         const SizedBox(width: 6),
@@ -663,9 +673,9 @@ class _MergedMessageDetailPage extends StatelessWidget {
                         const SizedBox(width: 6),
                         Text(
                           time,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 11,
-                            color: Color(0xFF999999),
+                            color: c.secondaryText,
                           ),
                         ),
                       ],
@@ -677,7 +687,7 @@ class _MergedMessageDetailPage extends StatelessWidget {
                   constraints: const BoxConstraints(maxWidth: 280),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: isLeft ? Colors.white : const Color(0xFFDCF8C6),
+                    color: isLeft ? c.surface : const Color(0xFFDCF8C6),
                     borderRadius: BorderRadius.only(
                       topLeft: Radius.circular(isLeft ? 4 : 12),
                       topRight: Radius.circular(isLeft ? 12 : 4),
@@ -695,9 +705,9 @@ class _MergedMessageDetailPage extends StatelessWidget {
                   child: ExtendedText(
                     content,
                     specialTextSpanBuilder: MessageEmojiTextSpanBuilder(),
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 15,
-                      color: Color(0xFF333333),
+                      color: isLeft ? c.primaryText : const Color(0xFF333333),
                       height: 1.4,
                     ),
                   ),
@@ -920,7 +930,7 @@ class _GeneralFavoriteDetailPageState
       Directory? directory;
       if (Platform.isAndroid) {
         // Android: 保存到 Downloads 目录
-        directory = Directory('/storage/emulated/0/Download/Youdu');
+        directory = Directory('/storage/emulated/0/Download/Telegram');
         if (!await directory.exists()) {
           await directory.create(recursive: true);
         }
@@ -940,7 +950,7 @@ class _GeneralFavoriteDetailPageState
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '已保存到: ${Platform.isAndroid ? 'Download/Youdu' : '应用文档目录'}/$fileName',
+              '已保存到: ${Platform.isAndroid ? 'Download/Telegram' : '应用文档目录'}/$fileName',
             ),
             duration: const Duration(seconds: 3),
           ),
@@ -1034,8 +1044,9 @@ class _GeneralFavoriteDetailPageState
 
   @override
   Widget build(BuildContext context) {
+    final c = AppColors.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
+      backgroundColor: c.scaffold,
       appBar: AppBar(
         backgroundColor: const Color(0xFF4A90E2),
         elevation: 0,
@@ -1079,20 +1090,21 @@ class _GeneralFavoriteDetailPageState
   }
 
   Widget _buildTextContent() {
+    final c = AppColors.of(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: c.surface,
           borderRadius: BorderRadius.circular(12),
         ),
         child: ExtendedText(
           widget.favorite.content,
           specialTextSpanBuilder: MessageEmojiTextSpanBuilder(),
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: 16,
-            color: Color(0xFF333333),
+            color: c.primaryText,
             height: 1.6,
           ),
         ),
@@ -1139,7 +1151,7 @@ class _GeneralFavoriteDetailPageState
           ),
           Text(
             '点击图片可放大预览',
-            style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            style: TextStyle(fontSize: 13, color: AppColors.of(context).secondaryText),
           ),
           const SizedBox(height: 8),
           Padding(
@@ -1381,7 +1393,7 @@ class _GeneralFavoriteDetailPageState
         ),
         // 视频信息和下载按钮
         Container(
-          color: Colors.white,
+          color: AppColors.of(context).surface,
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [

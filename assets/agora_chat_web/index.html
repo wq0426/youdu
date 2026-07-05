@@ -1,0 +1,240 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agora Chat Bridge</title>
+</head>
+<body>
+<!--
+  桌面端(macOS/Windows) Agora Chat 桥接页。
+  由 DesktopAgoraChatBridge 通过 flutter_inappwebview 的 HeadlessInAppWebView 承载(无界面)。
+
+  流程:
+  1. Flutter 加载本页(initialData)。
+  2. onLoadStop 后 Flutter 注入 agora-chat.js(设置 window.websdk)。
+  3. Flutter 调 acbridge.init(appKey) 建连接 + 注册事件；再调 acbridge.login(user, token)。
+
+  通信协议:
+  - Flutter → JS: evaluateJavascript 调用 window.acbridge.<method>(argJson, callId)。
+    每个方法异步完成后经 _result(callId, ok, dataOrErr) 回传。
+  - JS → Flutter 事件: _event(type, payload) —— 收消息/连接状态/撤回/已读/命令。
+  两者都通过 flutter_inappwebview.callHandler 上报。
+-->
+<script>
+(function () {
+  // 与 Flutter 侧约定的事件/结果通道名
+  var H_EVENT = 'acEvent';
+  var H_RESULT = 'acResult';
+  var H_LOG = 'acLog';
+
+  var conn = null;         // websdk connection 实例
+  var currentUser = null;  // 当前登录用户名(纯数字字符串)
+
+  function callHandler(name, obj) {
+    try {
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler(name, JSON.stringify(obj));
+      }
+    } catch (e) { /* 忽略：桥接不可用时不影响页面 */ }
+  }
+
+  function _event(type, payload) { callHandler(H_EVENT, { type: type, payload: payload || {} }); }
+  function _result(callId, ok, data) { callHandler(H_RESULT, { callId: callId, ok: ok, data: data }); }
+  function _log(msg) { callHandler(H_LOG, { msg: String(msg) }); }
+
+  // 统一把一条收到的消息规整为 Flutter 侧需要的字段集
+  function normMsg(m, msgType) {
+    return {
+      id: m.id || m.mid || '',
+      from: m.from || '',
+      to: m.to || '',
+      // 'singleChat' | 'groupChat' | 'chatRoom'
+      chatType: m.chatType || 'singleChat',
+      // 文本正文(富媒体这里是 URL)；cmd 消息无 msg
+      msg: (typeof m.msg === 'string') ? m.msg : '',
+      action: m.action || '',       // cmd 消息的 action
+      ext: m.ext || {},
+      time: m.time || 0,
+      msgType: msgType              // 'txt' | 'cmd' | 'recall' | 'read'
+    };
+  }
+
+  function registerHandlers() {
+    conn.addEventHandler('main', {
+      onConnected: function () { _event('connected', {}); },
+      onDisconnected: function () { _event('disconnected', {}); },
+      onOnline: function () { _event('connected', {}); },
+      onOffline: function () { _event('disconnected', {}); },
+      onError: function (e) { _log('SDK error: ' + JSON.stringify(e && (e.message || e.data || e))); },
+      onTokenWillExpire: function () { _event('tokenWillExpire', {}); },
+      onTokenExpired: function () { _event('tokenExpired', {}); },
+      onTextMessage: function (m) { _event('message', normMsg(m, 'txt')); },
+      // 富媒体在本项目里也是以 txt(URL) + ext.message_type 承载，理论上只会走 onTextMessage；
+      // 但为兼容真图片/文件消息，这里也接一下，统一转成 txt(content=url)。
+      onPictureMessage: function (m) { _event('message', normMsg({ id:m.id, from:m.from, to:m.to, chatType:m.chatType, msg:(m.url||''), ext:m.ext, time:m.time }, 'txt')); },
+      onFileMessage: function (m) { _event('message', normMsg({ id:m.id, from:m.from, to:m.to, chatType:m.chatType, msg:(m.url||''), ext:m.ext, time:m.time }, 'txt')); },
+      onAudioMessage: function (m) { _event('message', normMsg({ id:m.id, from:m.from, to:m.to, chatType:m.chatType, msg:(m.url||''), ext:m.ext, time:m.time }, 'txt')); },
+      onVideoMessage: function (m) { _event('message', normMsg({ id:m.id, from:m.from, to:m.to, chatType:m.chatType, msg:(m.url||''), ext:m.ext, time:m.time }, 'txt')); },
+      onCmdMessage: function (m) { _event('cmd', normMsg(m, 'cmd')); },
+      onRecallMessage: function (m) { _event('recall', normMsg(m, 'recall')); },
+      onReadMessage: function (m) { _event('read', normMsg(m, 'read')); },
+      // 会话已读回执(对端进入会话读了我发的全部) —— Web SDK 通过 channel ack 回调
+      onChannelMessage: function (m) { _event('convRead', { from: (m && m.from) || '' }); },
+      onPresence: function (m) { _event('presence', m || {}); }
+    });
+  }
+
+  window.acbridge = {
+    // 初始化连接 + 注册事件。arg = {appKey}
+    init: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        if (!window.websdk) { _result(callId, false, 'websdk 未注入'); return; }
+        conn = new window.websdk.connection({ appKey: arg.appKey });
+        registerHandlers();
+        _result(callId, true, {});
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 登录。arg = {user, token}
+    login: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        currentUser = String(arg.user);
+        conn.open({ user: currentUser, accessToken: arg.token })
+          .then(function () { _result(callId, true, {}); })
+          .catch(function (e) {
+            // code=207/已登录 视为成功
+            var code = (e && (e.type || e.code));
+            _result(callId, false, (e && (e.message || e.data)) ? JSON.stringify({ code: code, msg: e.message || e.data }) : String(e));
+          });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 登出
+    logout: function (argJson, callId) {
+      try { if (conn) conn.close(); currentUser = null; _result(callId, true, {}); }
+      catch (e) { _result(callId, false, String(e)); }
+    },
+
+    renewToken: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        conn.renewToken(arg.token).then(function () { _result(callId, true, {}); })
+          .catch(function (e) { _result(callId, false, String(e)); });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 发送文本/富媒体(富媒体 content=URL, 类型走 ext.message_type)
+    // arg = {to, content, chatType:'singleChat'|'groupChat', ext}
+    // 成功回传 {msgId} = 服务端消息ID，用于乐观更新回填。
+    sendText: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        var msg = window.websdk.message.create({
+          type: 'txt', chatType: arg.chatType, to: String(arg.to),
+          msg: arg.content, ext: arg.ext || {}
+        });
+        conn.send(msg).then(function (res) {
+          _result(callId, true, { msgId: (res && (res.serverMsgId || res.mid || res.id)) || (msg.id || '') });
+        }).catch(function (e) { _result(callId, false, String(e && (e.message || e.data) || e)); });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 发送命令消息(正在输入 / 通话信令)。arg = {to, chatType, action, ext, deliverOnlineOnly}
+    sendCmd: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        var msg = window.websdk.message.create({
+          type: 'cmd', chatType: arg.chatType, to: String(arg.to),
+          action: arg.action, ext: arg.ext || {},
+          deliverOnlineOnly: !!arg.deliverOnlineOnly
+        });
+        conn.send(msg).then(function () { _result(callId, true, {}); })
+          .catch(function (e) { _result(callId, false, String(e && (e.message || e.data) || e)); });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 拉历史。arg = {targetId, chatType, pageSize, cursor}
+    // 回传 {messages:[normMsg...], cursor, isLast}
+    getHistory: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        conn.getHistoryMessages({
+          targetId: String(arg.targetId),
+          chatType: arg.chatType,
+          pageSize: arg.pageSize || 20,
+          cursor: (arg.cursor && arg.cursor.length) ? arg.cursor : -1,
+          searchDirection: 'up'
+        }).then(function (res) {
+          var list = (res.messages || []).map(function (m) { return normMsg(m, (m.type === 'cmd' ? 'cmd' : 'txt')); });
+          _result(callId, true, { messages: list, cursor: res.cursor || '', isLast: !!res.isLast });
+        }).catch(function (e) { _result(callId, false, String(e && (e.message || e.data) || e)); });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 撤回。arg = {mid, to, chatType}
+    recall: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        conn.recallMessage({ mid: String(arg.mid), to: String(arg.to), chatType: arg.chatType })
+          .then(function () { _result(callId, true, {}); })
+          .catch(function (e) { _result(callId, false, JSON.stringify({ code: (e && (e.type||e.code)), msg: (e && (e.message||e.data)) })); });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 会话已读回执。arg = {to, chatType}
+    readAck: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        // 用 channel ack 通知对端"该会话已全部读"
+        var msg = window.websdk.message.create({
+          type: 'channel', chatType: arg.chatType, to: String(arg.to)
+        });
+        conn.send(msg).then(function () { _result(callId, true, {}); })
+          .catch(function () { _result(callId, true, {}); }); // 已读失败不算错
+      } catch (e) { _result(callId, true, {}); }
+    },
+
+    // 拉会话列表。arg = {pageSize, cursor}
+    // 回传 {conversations:[{id, type:'singleChat'|'groupChat', unread, lastMessage:normMsg|null}], cursor}
+    getConversations: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        conn.getServerConversations({ pageSize: arg.pageSize || 50, cursor: (arg.cursor||'') })
+          .then(function (res) {
+            var data = (res && res.data) || {};
+            var convs = (data.conversations || []).map(function (c) {
+              var lm = c.lastMessage || null;
+              return {
+                id: (c.conversationId || (c.conversationId===0?'0':'')) + '',
+                type: c.conversationType || 'singleChat',
+                unread: c.unReadCount || 0,
+                lastMessage: lm ? normMsg(lm, (lm.type === 'cmd' ? 'cmd' : 'txt')) : null
+              };
+            });
+            _result(callId, true, { conversations: convs, cursor: (data.cursor || '') });
+          }).catch(function (e) { _result(callId, false, String(e && (e.message||e.data) || e)); });
+      } catch (e) { _result(callId, false, String(e)); }
+    },
+
+    // 发布在线状态。arg = {description}
+    publishPresence: function (argJson, callId) {
+      try {
+        var arg = JSON.parse(argJson);
+        if (conn.publishPresence) {
+          conn.publishPresence({ description: arg.description || 'online' })
+            .then(function () { _result(callId, true, {}); })
+            .catch(function () { _result(callId, true, {}); });
+        } else { _result(callId, true, {}); }
+      } catch (e) { _result(callId, true, {}); }
+    }
+  };
+
+  // 通知 Flutter：桥接 glue 就绪(此时 websdk 可能尚未注入)
+  _event('glueReady', {});
+})();
+</script>
+</body>
+</html>

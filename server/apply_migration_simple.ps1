@@ -35,8 +35,8 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Migration applied successfully!"
     Write-Host ""
     Write-Host "Next steps:"
-    Write-Host "1. Rebuild server: go build -o youdu_server.exe main.go"
-    Write-Host "2. Run server: ./youdu_server.exe"
+    Write-Host "1. Rebuild server: go build -o telegram-server.exe main.go"
+    Write-Host "2. Run server: ./telegram-server.exe"
     Write-Host "3. Test group message delete function"
 } else {
     Write-Host ""

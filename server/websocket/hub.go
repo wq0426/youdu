@@ -3,7 +3,7 @@ package websocket
 import (
 	"sync"
 	"time"
-	"youdu-server/utils"
+	"telegram-server/utils"
 )
 
 // 消息处理队列配置
@@ -11,7 +11,7 @@ const (
 	// 消息队列缓冲大小
 	messageQueueSize = 9999
 	// 消息处理worker数量
-	messageWorkerCount = 20
+	messageWorkerCount = 64
 )
 
 // Client 表示一个WebSocket客户端连接
@@ -42,6 +42,17 @@ type IncomingMessage struct {
 }
 
 // Hub 维护活动的客户端连接和消息广播
+//
+// 🔴 高并发设计（支撑上万并发连接，注册/注销/发送互不阻塞）：
+//   - 不再使用"单 goroutine + 无缓冲 channel"串行处理注册/注销/发送，
+//     改为细粒度读写锁的直接方法调用（RegisterClient/UnregisterClient/SendToUser）
+//   - 注册/注销只在写锁内做 map 操作（微秒级），踢旧连接等耗时操作放独立 goroutine，
+//     因此大量用户同时建立连接不会阻塞已有连接的消息收发
+//   - 消息发送只需读锁，多个发送方完全并行
+//   - 所有对 Send channel 的写入必须走 SafeSend，禁止裸写
+//     （向已关闭的 channel 写入会 panic，导致整个进程崩溃、所有连接断开）
+//   - 发送缓冲满只丢弃该条消息，绝不关闭连接；连接的关闭只由三种情况触发：
+//     心跳超时（CheckHeartbeat）、底层读写超时（ReadPump/WritePump）、同账号顶号
 type Hub struct {
 	// 已注册的客户端 (userID -> Client)
 	clients map[int]*Client
@@ -49,15 +60,6 @@ type Hub struct {
 	// 用户通话状态 (userID -> UserCallStatus)
 	callStatuses map[int]*UserCallStatus
 	callStatusMu sync.RWMutex
-
-	// 客户端注册请求
-	Register chan *Client
-
-	// 客户端注销请求
-	Unregister chan *Client
-
-	// 消息广播
-	Broadcast chan *BroadcastMessage
 
 	// 消息处理队列（带缓冲的channel，容量9999）
 	MessageQueue chan *IncomingMessage
@@ -72,20 +74,11 @@ type Hub struct {
 	OnUserOffline func(userID int)
 }
 
-// BroadcastMessage 广播消息结构
-type BroadcastMessage struct {
-	UserID  int    // 目标用户ID
-	Message []byte // 消息内容
-}
-
 // NewHub 创建新的Hub
 func NewHub() *Hub {
 	return &Hub{
 		clients:      make(map[int]*Client),
 		callStatuses: make(map[int]*UserCallStatus),
-		Register:     make(chan *Client),
-		Unregister:   make(chan *Client),
-		Broadcast:    make(chan *BroadcastMessage),
 		MessageQueue: make(chan *IncomingMessage, messageQueueSize),
 	}
 }
@@ -177,104 +170,61 @@ func (c *Client) GetMissedPings() int {
 	return c.missedPings
 }
 
-// Run 启动Hub
-func (h *Hub) Run() {
-	for {
-		select {
-		case client := <-h.Register:
-			h.mu.Lock()
-			// 🔴 如果用户已经有连接，发送踢下线通知后再替换
-			if oldClient, ok := h.clients[client.UserID]; ok {
-				utils.LogDebug("🔄 [Hub] 用户 %d 重新连接，向旧设备发送踢下线通知", client.UserID)
+// RegisterClient 注册客户端连接
+// 🔴 写锁内只做 map 替换（微秒级），不做任何耗时操作，
+// 保证大量用户同时建立连接也不会互相阻塞、不会影响已有连接的消息收发
+func (h *Hub) RegisterClient(client *Client) {
+	client.ConnectedAt = time.Now()
 
-				// 🔴 关键修复：先注册新连接，再处理旧连接
-				// 这样可以确保 forced_logout 不会发送到新连接
-				h.clients[client.UserID] = client
-				client.ConnectedAt = time.Now()
-				
-				h.mu.Unlock()
+	h.mu.Lock()
+	oldClient := h.clients[client.UserID]
+	h.clients[client.UserID] = client
+	totalOnline := len(h.clients)
+	h.mu.Unlock()
 
-				// 🔴 向旧设备发送踢下线通知
-				forceLogoutMsg := []byte(`{"type":"forced_logout","data":{"reason":"您的账号已在其他设备登录"},"message":"您的账号已在其他设备登录"}`)
-				
-				// 尝试发送踢下线通知（不阻塞）
-				if oldClient.SafeSend(forceLogoutMsg) {
-					utils.LogDebug("✅ [Hub] 已向用户 %d 的旧设备发送踢下线通知", client.UserID)
-					// 给旧设备一点时间处理通知
-					time.Sleep(100 * time.Millisecond)
-				}
-				
-				// 关闭旧连接
-				oldClient.closeSend()
-
-				utils.LogDebug("✅ [Hub] 用户 %d 旧连接已关闭，新连接已注册", client.UserID)
-			} else {
-				// 没有旧连接，直接注册新连接
-				client.ConnectedAt = time.Now()
-				h.clients[client.UserID] = client
-				h.mu.Unlock()
+	// 🔴 同账号重复登录：踢旧连接的通知和延迟关闭放到独立 goroutine，
+	// 不阻塞注册流程（旧实现在这里的 100ms Sleep 会卡住整个 Hub）
+	// 注意：新连接已先替换进 map，forced_logout 只会发到旧连接
+	if oldClient != nil {
+		go func() {
+			utils.LogDebug("🔄 [Hub] 用户 %d 重新连接，向旧设备发送踢下线通知", client.UserID)
+			forceLogoutMsg := []byte(`{"type":"forced_logout","data":{"reason":"您的账号已在其他设备登录"},"message":"您的账号已在其他设备登录"}`)
+			if oldClient.SafeSend(forceLogoutMsg) {
+				// 给旧设备一点时间处理通知
+				time.Sleep(100 * time.Millisecond)
 			}
-			
-			// 打印当前所有在线用户ID
-			h.mu.RLock()
-			var onlineUserIDs []int
-			for userID := range h.clients {
-				onlineUserIDs = append(onlineUserIDs, userID)
-			}
-			h.mu.RUnlock()
-			
-		case client := <-h.Unregister:
-			h.mu.Lock()
-			// 检查要断开的连接是否真的是当前在线的连接
-			// 避免误删新连接（旧连接断开时，新连接可能已经注册）
-			if currentClient, ok := h.clients[client.UserID]; ok {
-				// 只有当前连接和要断开的连接是同一个，才删除
-				if currentClient == client {
-					delete(h.clients, client.UserID)
-					client.closeSend()
-					utils.LogDebug("🔌 [Hub] 用户 %d 已断开连接 (总连接数: %d)", client.UserID, len(h.clients))
+			oldClient.closeSend()
+			utils.LogDebug("✅ [Hub] 用户 %d 旧连接已关闭，新连接已接管", client.UserID)
+		}()
+	}
 
-					// 调用离线通知回调（在锁外执行，避免死锁）
-					userID := client.UserID
-					h.mu.Unlock()
-					if h.OnUserOffline != nil {
-						go h.OnUserOffline(userID)
-					}
-				} else {
-					// 这是旧连接断开，但新连接已经注册，忽略
-					h.mu.Unlock()
-					utils.LogDebug("ℹ️ [Hub] 用户 %d 的旧连接断开，新连接已接管", client.UserID)
-				}
-			} else {
-				h.mu.Unlock()
-				utils.LogDebug("⚠️ [Hub] 用户 %d 尝试断开但不在在线列表中", client.UserID)
-			}
+	utils.LogDebug("✅ [Hub] 用户 %d 已注册 (当前在线: %d)", client.UserID, totalOnline)
+}
 
-		case message := <-h.Broadcast:
-			h.mu.RLock()
-			client, ok := h.clients[message.UserID]
-			totalOnlineUsers := len(h.clients)
-			h.mu.RUnlock()
+// UnregisterClient 注销客户端连接
+// 只有当要断开的连接就是当前在线的连接时才删除，
+// 避免误删同一账号已接管的新连接
+func (h *Hub) UnregisterClient(client *Client) {
+	h.mu.Lock()
+	currentClient, ok := h.clients[client.UserID]
+	isCurrent := ok && currentClient == client
+	if isCurrent {
+		delete(h.clients, client.UserID)
+	}
+	totalOnline := len(h.clients)
+	h.mu.Unlock()
 
-			utils.LogDebug("🔄 [Hub] 收到广播消息 - 目标用户ID: %d, 用户在线: %v, 当前在线总数: %d", message.UserID, ok, totalOnlineUsers)
+	// closeSend 幂等，确保该连接的 WritePump 退出
+	client.closeSend()
 
-			if ok {
-				select {
-				case client.Send <- message.Message:
-					// 消息发送成功
-					utils.LogDebug("✅ [Hub] 消息成功发送到用户 %d 的Send通道 (通道缓冲区可用)", message.UserID)
-				default:
-					// 发送失败，关闭连接
-					h.mu.Lock()
-					client.closeSend()
-					delete(h.clients, client.UserID)
-					h.mu.Unlock()
-					utils.LogDebug("❌ [Hub] 用户 %d 消息发送失败，连接已关闭", client.UserID)
-				}
-			} else {
-				utils.LogDebug("⚠️ [Hub] 用户 %d 不在线，无法发送消息", message.UserID)
-			}
+	if isCurrent {
+		utils.LogDebug("🔌 [Hub] 用户 %d 已断开连接 (总连接数: %d)", client.UserID, totalOnline)
+		if h.OnUserOffline != nil {
+			go h.OnUserOffline(client.UserID)
 		}
+	} else {
+		// 旧连接断开，但同一账号的新连接已注册（或已被其他路径移除），忽略
+		utils.LogDebug("ℹ️ [Hub] 用户 %d 的旧连接断开，不影响当前连接", client.UserID)
 	}
 }
 
@@ -293,13 +243,27 @@ func (h *Hub) GetOnlineUserCount() int {
 	return len(h.clients)
 }
 
-// SendToUser 向指定用户发送消息
+// SendToUser 向指定用户发送消息，返回消息是否已投递到该用户的发送队列
+// 🔴 只需读锁，多个发送方完全并行，不经过任何单点串行处理
+// 🔴 发送缓冲满或连接正在关闭时只放弃本条消息，绝不因此关闭连接
+//    （真正断开的连接会由心跳超时/底层读写超时自动清理）
 func (h *Hub) SendToUser(userID int, message []byte) bool {
-	h.Broadcast <- &BroadcastMessage{
-		UserID:  userID,
-		Message: message,
+	h.mu.RLock()
+	client, ok := h.clients[userID]
+	h.mu.RUnlock()
+
+	if !ok {
+		utils.LogDebug("⚠️ [Hub] 用户 %d 不在线，无法发送消息", userID)
+		return false
 	}
-	return h.IsUserOnline(userID)
+
+	if !client.SafeSend(message) {
+		utils.LogDebug("⚠️ [Hub] 用户 %d 发送缓冲已满或连接已关闭，本条消息未投递", userID)
+		return false
+	}
+
+	utils.LogDebug("✅ [Hub] 消息已投递到用户 %d 的发送队列", userID)
+	return true
 }
 
 // BroadcastToChannel 向频道中的所有在线用户广播消息（排除指定用户）
@@ -320,11 +284,11 @@ func (h *Hub) BroadcastToChannel(channelName string, message []byte, excludeUser
 
 		// 发送消息给所有其他在线用户（简化实现）
 		// 在实际应用中，应该维护频道-用户的映射关系
-		select {
-		case client.Send <- message:
+		// 🔴 必须走 SafeSend：裸写已关闭的 channel 会 panic 导致整个进程崩溃
+		if client.SafeSend(message) {
 			sentCount++
 			utils.LogDebug("✅ [Hub] 频道广播消息已发送给用户 %d", userID)
-		default:
+		} else {
 			utils.LogDebug("❌ [Hub] 向用户 %d 发送频道广播消息失败", userID)
 		}
 	}
@@ -347,11 +311,11 @@ func (h *Hub) BroadcastToUsers(userIDs []int, message []byte, excludeUserID int)
 
 		// 检查用户是否在线
 		if client, ok := h.clients[userID]; ok {
-			select {
-			case client.Send <- message:
+			// 🔴 必须走 SafeSend：裸写已关闭的 channel 会 panic 导致整个进程崩溃
+			if client.SafeSend(message) {
 				sentCount++
 				utils.LogDebug("✅ [Hub] 广播消息已发送给用户 %d", userID)
-			default:
+			} else {
 				utils.LogDebug("❌ [Hub] 向用户 %d 发送广播消息失败", userID)
 			}
 		} else {
@@ -410,16 +374,27 @@ func (h *Hub) ForceLogoutUser(userID int, reason string) bool {
 
 // CheckHeartbeat 检查所有客户端的心跳状态
 // 增加所有客户端的missedPings计数，如果达到2次则断开连接
+// 🔴 先在读锁下递增计数并收集超时客户端（不阻塞注册和消息发送），
+// 再用一次短暂写锁删除，删除时做指针比对避免误删同一账号刚建立的新连接
 func (h *Hub) CheckHeartbeat() {
-	h.mu.Lock()
+	h.mu.RLock()
 	var disconnectedClients []*Client
-
-	for userID, client := range h.clients {
-		missedPings := client.IncrementMissedPings()
-
-		if missedPings >= 2 {
+	for _, client := range h.clients {
+		if client.IncrementMissedPings() >= 2 {
 			disconnectedClients = append(disconnectedClients, client)
-			delete(h.clients, userID)
+		}
+	}
+	h.mu.RUnlock()
+
+	if len(disconnectedClients) == 0 {
+		return
+	}
+
+	h.mu.Lock()
+	for _, client := range disconnectedClients {
+		// 指针比对：期间该用户可能已用新连接顶替，不能误删新连接
+		if current, ok := h.clients[client.UserID]; ok && current == client {
+			delete(h.clients, client.UserID)
 		}
 	}
 	h.mu.Unlock()

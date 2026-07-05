@@ -5,9 +5,9 @@ echo ========================================
 echo.
 
 REM 清理旧的构建文件
-if exist youdu-server.exe (
+if exist telegram-server.exe (
     echo [清理] 删除旧的构建文件...
-    del youdu-server.exe
+    del telegram-server.exe
 )
 
 REM 下载依赖
@@ -25,7 +25,7 @@ go mod tidy
 
 REM 构建
 echo [3/3] 正在构建可执行文件...
-go build -o youdu-server.exe main.go
+go build -o telegram-server.exe main.go
 if errorlevel 1 (
     echo [错误] 构建失败
     pause
@@ -37,12 +37,12 @@ echo ========================================
 echo 构建成功！
 echo ========================================
 echo.
-echo 可执行文件: youdu-server.exe
+echo 可执行文件: telegram-server.exe
 echo.
 echo 运行方式:
 echo   1. 确保已配置 .env 文件
 echo   2. 确保 PostgreSQL 服务已启动
-echo   3. 执行: youdu-server.exe
+echo   3. 执行: telegram-server.exe
 echo ========================================
 pause
 

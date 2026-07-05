@@ -5,11 +5,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 import 'package:chewie/chewie.dart';
-import 'package:youdu/models/favorite_model.dart';
-import 'package:youdu/services/api_service.dart';
-import 'package:youdu/utils/storage.dart';
-import 'package:youdu/utils/emoji_text_span_builder.dart';
-import 'package:youdu/utils/app_localizations.dart';
+import 'package:telegram/models/favorite_model.dart';
+import 'package:telegram/services/api_service.dart';
+import 'package:telegram/utils/storage.dart';
+import 'package:telegram/utils/emoji_text_span_builder.dart';
+import 'package:telegram/utils/app_localizations.dart';
 import '../utils/logger.dart';
 
 /// 收藏列表对话

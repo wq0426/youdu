@@ -15,7 +15,7 @@ call flutter build windows --debug --no-tree-shake-icons --no-pub
 echo.
 echo ====================================
 echo Incremental build complete!
-echo Output: build\windows\x64\runner\Debug\youdu.exe
+echo Output: build\windows\x64\runner\Debug\telegram.exe
 echo ====================================
 
 call flutter run -d windows --debug

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"youdu-server/utils"
+	"telegram-server/utils"
 
 	"github.com/spf13/viper"
 )

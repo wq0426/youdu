@@ -22,7 +22,7 @@ import CallKit
         CallKitManager.shared.initialize(with: controller.binaryMessenger)
         
         // 设置 Method Channel 用于排除 iCloud 备份
-        let backupChannel = FlutterMethodChannel(name: "com.youdu.app/backup", binaryMessenger: controller.binaryMessenger)
+        let backupChannel = FlutterMethodChannel(name: "com.telegram.app/backup", binaryMessenger: controller.binaryMessenger)
         
         backupChannel.setMethodCallHandler { [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) in
             if call.method == "excludeFromBackup" {
@@ -40,7 +40,7 @@ import CallKit
         }
         
         // 🔴 设置消息弹窗 Method Channel
-        messageChannel = FlutterMethodChannel(name: "com.example.youdu/message", binaryMessenger: controller.binaryMessenger)
+        messageChannel = FlutterMethodChannel(name: "com.example.telegram/message", binaryMessenger: controller.binaryMessenger)
         
         messageChannel?.setMethodCallHandler { [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) in
             switch call.method {

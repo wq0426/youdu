@@ -3,9 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:youdu/utils/storage.dart';
-import 'package:youdu/utils/app_localizations.dart';
-import 'package:youdu/main.dart';
+import 'package:telegram/utils/storage.dart';
+import 'package:telegram/utils/app_localizations.dart';
+import 'package:telegram/main.dart';
 import '../utils/logger.dart';
 import '../services/update_service.dart';
 import 'update_dialog.dart';
@@ -46,10 +46,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   // 通用设置状态
   final TextEditingController _messagePathController = TextEditingController(
-    text: 'C:\\Users\\WIN10\\Documents\\youdu-files',
+    text: 'C:\\Users\\WIN10\\Documents\\telegram-files',
   );
   final TextEditingController _filePathController = TextEditingController(
-    text: 'C:\\Users\\WIN10\\Documents\\youdu-files\\16119908-100022\\files',
+    text: 'C:\\Users\\WIN10\\Documents\\telegram-files\\16119908-100022\\files',
   );
   final TextEditingController _autoDownloadSizeController =
       TextEditingController(text: '30');

@@ -3,8 +3,9 @@ import '../utils/logger.dart';
 
 /// 消息模型
 class MessageModel {
-  final int id; // 本地数据库ID
+  final int id; // 本地数据库ID（Agora 消息用 msgId 的稳定哈希派生，保证列表 key 唯一）
   final int? serverId; // 服务器返回的消息ID（用于引用消息时使用）
+  final String? agoraMsgId; // Agora Chat 消息ID（撤回/已读/引用等操作以此为准）
   final int senderId;
   final int receiverId;
   final String senderName;
@@ -33,6 +34,7 @@ class MessageModel {
   MessageModel({
     required this.id,
     this.serverId,
+    this.agoraMsgId,
     required this.senderId,
     required this.receiverId,
     required this.senderName,
@@ -137,6 +139,7 @@ class MessageModel {
     return MessageModel(
       id: id,
       serverId: serverId,
+      agoraMsgId: json['agora_msg_id'] as String?,
       senderId: senderId,
       receiverId: receiverId,
       senderName: senderName,
@@ -203,6 +206,7 @@ class MessageModel {
     return {
       'id': id,
       if (serverId != null) 'server_id': serverId,
+      if (agoraMsgId != null) 'agora_msg_id': agoraMsgId,
       'sender_id': senderId,
       'receiver_id': receiverId,
       'sender_name': senderName,
@@ -280,6 +284,7 @@ class MessageModel {
   MessageModel copyWith({
     int? id,
     int? serverId,
+    String? agoraMsgId,
     int? senderId,
     int? receiverId,
     String? senderName,
@@ -308,6 +313,7 @@ class MessageModel {
     return MessageModel(
       id: id ?? this.id,
       serverId: serverId ?? this.serverId,
+      agoraMsgId: agoraMsgId ?? this.agoraMsgId,
       senderId: senderId ?? this.senderId,
       receiverId: receiverId ?? this.receiverId,
       senderName: senderName ?? this.senderName,

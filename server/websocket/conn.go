@@ -2,7 +2,7 @@ package websocket
 
 import (
 	"time"
-	"youdu-server/utils"
+	"telegram-server/utils"
 
 	"github.com/gorilla/websocket"
 )
@@ -34,7 +34,7 @@ func NewConn(ws *websocket.Conn) *Conn {
 // ReadPump 从WebSocket连接读取消息并发送到hub
 func (c *Conn) ReadPump(client *Client, hub *Hub, handleMessage func(*Client, []byte)) {
 	defer func() {
-		hub.Unregister <- client
+		hub.UnregisterClient(client)
 		c.ws.Close()
 	}()
 

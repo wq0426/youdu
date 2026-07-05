@@ -12,7 +12,7 @@ class CallKitService {
   CallKitService._internal();
 
   static const MethodChannel _channel =
-      MethodChannel('com.example.youdu/callkit');
+      MethodChannel('com.example.telegram/callkit');
 
   // 回调函数
   Function(Map<String, dynamic> callInfo)? onCallAccepted;

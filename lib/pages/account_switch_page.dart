@@ -3,6 +3,8 @@ import '../utils/storage.dart';
 import '../utils/logger.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
+import '../services/agora_chat_service.dart';
+import '../services/agora_service.dart';
 import '../services/update_checker.dart';
 import 'login_page.dart';
 import 'mobile_chat_page.dart';
@@ -115,6 +117,21 @@ class _AccountSwitchPageState extends State<AccountSwitchPage> {
       await WebSocketService().disconnect(sendOfflineStatus: false);
       logger.debug('✅ WebSocket连接已断开');
 
+      // 2.5 登出旧账号的 Agora Chat 会话（关键！否则新账号发消息仍以旧账号身份投递）
+      await AgoraChatService().logout();
+      logger.debug('✅ Agora Chat 旧账号会话已登出');
+
+      // 2.6 登出并释放 Agora RTC 通话引擎。
+      // 引擎此前在整个进程生命周期内从不释放，会一直持有旧账号上下文；
+      // 切换时主动释放，新账号进入主页时会重新干净初始化。
+      // 加超时保护，避免原生 release 卡住切换流程（不阻塞后续登录）。
+      try {
+        await AgoraService().logout().timeout(const Duration(seconds: 5));
+        logger.debug('✅ Agora RTC 通话引擎已释放');
+      } catch (e) {
+        logger.debug('⚠️ 释放 Agora RTC 引擎失败/超时（忽略）: $e');
+      }
+
       // 3. 获取目标账号的保存密码
       final savedAccount = await Storage.getSavedAccount(account.userId);
       final savedPassword = await Storage.getSavedPassword(account.userId);
@@ -159,15 +176,7 @@ class _AccountSwitchPageState extends State<AccountSwitchPage> {
         await logger.init(userId: user['id'].toString());
         logger.info('📝 日志系统已重新初始化，用户ID: ${user['id']}');
 
-        // 🔴 切换账号后清除服务器端的消息同步记录（确保能收到所有离线消息）
-        try {
-          final clearResult = await ApiService.clearSyncedRecords(token: token);
-          if (clearResult['code'] == 0) {
-            logger.info('✅ 服务器端消息同步记录已清除');
-          }
-        } catch (e) {
-          logger.debug('⚠️ 清除服务器端消息同步记录异常: $e');
-        }
+        // 🔵 阶段6：离线消息改由 Agora Chat 投递，不再清除后端同步记账记录。
 
         // 清除所有本地缓存
         logger.info('🗑️ 切换账号成功，开始清除所有本地缓存...');
@@ -227,6 +236,10 @@ class _AccountSwitchPageState extends State<AccountSwitchPage> {
       logger.debug('🔌 开始断开WebSocket连接...');
       await WebSocketService().disconnect(sendOfflineStatus: false);
       logger.debug('✅ WebSocket连接已断开');
+
+      // 登出旧账号的 Agora Chat 会话（关键！否则新账号发消息仍以旧账号身份投递）
+      await AgoraChatService().logout();
+      logger.debug('✅ Agora Chat 旧账号会话已登出');
 
       // 清除当前登录信息（但保留已登录账号列表）
       await Storage.clearLoginInfo();

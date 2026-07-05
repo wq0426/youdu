@@ -39,10 +39,11 @@ const render = () => {
   }
   app.innerHTML = `
     <div class="sidebar d-flex flex-column">
-      <div class="p-3 text-white"><h5>YouDu 管理后台</h5></div>
+      <div class="p-3 text-white"><h5>Telegram 管理后台</h5></div>
       <nav class="nav flex-column">
         <a class="nav-link ${currentPage === 'users' ? 'active' : ''}" href="#" onclick="showPage('users')"><i class="bi bi-people me-2"></i>用户管理</a>
-        <a class="nav-link ${currentPage === 'messages' ? 'active' : ''}" href="#" onclick="showPage('messages')"><i class="bi bi-chat-dots me-2"></i>聊天记录</a>
+        <a class="nav-link ${currentPage === 'privateMsgs' ? 'active' : ''}" href="#" onclick="showPage('privateMsgs')"><i class="bi bi-chat-dots me-2"></i>单聊记录</a>
+        <a class="nav-link ${currentPage === 'groupMsgs' ? 'active' : ''}" href="#" onclick="showPage('groupMsgs')"><i class="bi bi-chat-square-text me-2"></i>群聊记录</a>
         <a class="nav-link ${currentPage === 'inviteCodes' ? 'active' : ''}" href="#" onclick="showPage('inviteCodes')"><i class="bi bi-ticket me-2"></i>邀请码管理</a>
         <a class="nav-link ${currentPage === 'admins' ? 'active' : ''}" href="#" onclick="showPage('admins')"><i class="bi bi-person-gear me-2"></i>账号管理</a>
         <a class="nav-link" href="#" onclick="logout()"><i class="bi bi-box-arrow-right me-2"></i>退出登录</a>
@@ -58,7 +59,8 @@ const showPage = (page) => { currentPage = page; loadPage(); document.querySelec
 const loadPage = () => {
   const content = document.getElementById('page-content');
   if (currentPage === 'users') loadUsers(content);
-  else if (currentPage === 'messages') loadMessages(content);
+  else if (currentPage === 'privateMsgs') loadPrivateMsgs(content);
+  else if (currentPage === 'groupMsgs') loadGroupMsgs(content);
   else if (currentPage === 'inviteCodes') loadInviteCodes(content);
   else if (currentPage === 'admins') loadAdmins(content);
 };
@@ -66,7 +68,7 @@ const loadPage = () => {
 const renderLogin = () => `
   <div class="login-container">
     <div class="card p-4">
-      <h4 class="text-center mb-4">有度管理系统</h4>
+      <h4 class="text-center mb-4">Telegram 管理系统</h4>
       <form onsubmit="handleLogin(event)" autocomplete="off">
         <div class="mb-3"><input type="text" class="form-control" id="username" placeholder="用户名" required autocomplete="new-password"></div>
         <div class="mb-3"><input type="password" class="form-control" id="password" placeholder="密码" required autocomplete="new-password"></div>
@@ -501,6 +503,280 @@ const renderMessageContent = (m) => {
 };
 
 
+// ===== 聊天记录（单聊/群聊 平铺列表）=====
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const MSG_TYPE_LABELS = { text: '文本', image: '图片', file: '文件', voice: '语音', video: '视频', system: '系统' };
+const msgTypeLabel = (t) => (t && t.startsWith('call')) ? '通话' : (MSG_TYPE_LABELS[t] || t || '-');
+
+const msgTypeOptions = (selected) => `
+  <option value="">全部类型</option>
+  <option value="text" ${selected === 'text' ? 'selected' : ''}>文本</option>
+  <option value="image" ${selected === 'image' ? 'selected' : ''}>图片</option>
+  <option value="file" ${selected === 'file' ? 'selected' : ''}>文件</option>
+  <option value="voice" ${selected === 'voice' ? 'selected' : ''}>语音</option>
+  <option value="video" ${selected === 'video' ? 'selected' : ''}>视频</option>
+  <option value="call" ${selected === 'call' ? 'selected' : ''}>通话</option>
+  <option value="system" ${selected === 'system' ? 'selected' : ''}>系统</option>`;
+
+const msgStatusOptions = (selected) => `
+  <option value="">全部状态</option>
+  <option value="normal" ${selected === 'normal' ? 'selected' : ''}>正常</option>
+  <option value="recalled" ${selected === 'recalled' ? 'selected' : ''}>已撤回</option>`;
+
+// 表格内容列：按类型展示摘要。图片/视频/语音点击弹窗直接预览播放；文件点击直接下载。
+const msgContentCell = (m, listType) => {
+  if (m.status === 'recalled') return '<em class="text-muted">消息已撤回</em>';
+  if (m.message_type === 'image') return `<a href="javascript:void(0)" onclick="openMsgMedia('${listType}', ${m.id})"><i class="bi bi-image"></i> 图片</a>`;
+  if (m.message_type === 'file') return `<a href="javascript:void(0)" onclick="downloadMsgFile('${listType}', ${m.id})" title="点击下载"><i class="bi bi-file-earmark-arrow-down"></i> ${esc(m.file_name || '文件')}</a>`;
+  if (m.message_type === 'voice') return `<a href="javascript:void(0)" onclick="openMsgMedia('${listType}', ${m.id})"><i class="bi bi-mic"></i> 语音${m.voice_duration ? ` (${m.voice_duration}秒)` : ''}</a>`;
+  if (m.message_type === 'video') return `<a href="javascript:void(0)" onclick="openMsgMedia('${listType}', ${m.id})"><i class="bi bi-camera-video"></i> 视频</a>`;
+  if (m.message_type && m.message_type.startsWith('call')) return `<i class="bi bi-telephone"></i> ${m.call_type === 'video' ? '视频' : '语音'}通话`;
+  // 文本：单元格 CSS 截断显示尾部省略号，完整内容放 title 里鼠标悬浮展示
+  const text = String(m.content || '');
+  return `<span title="${esc(text)}">${esc(text)}</span>`;
+};
+
+// 单聊列表用户单元格：账号 + 昵称两行展示（来自 users 表；用户已删则回退归档时记录的名字）
+const pmUserCell = (username, fullname, fallbackName, id) => {
+  const acct = username || fallbackName || (id != null ? `ID:${id}` : '-');
+  return `${esc(acct)}${fullname ? `<br><small class="text-muted">${esc(fullname)}</small>` : ''}`;
+};
+const pmUserTitle = (username, fullname, fallbackName) =>
+  `账号: ${username || fallbackName || '-'}${fullname ? ` / 昵称: ${fullname}` : ''}`;
+
+// 媒体预览弹窗：图片直接看，视频/语音打开即播放；关闭弹窗时清空内容停止播放
+const openMsgMedia = (listType, id) => {
+  // 注意: 归档表主键是 bigint，pg 驱动返回字符串，必须转成同类型再比较
+  const m = (listType === 'pm' ? pmData : gmData).find(x => String(x.id) === String(id));
+  if (!m || !m.content) return;
+  const url = esc(m.content);
+  let html, title;
+  if (m.message_type === 'image') { title = '图片预览'; html = `<img src="${url}" style="max-width:100%;max-height:75vh" class="rounded">`; }
+  else if (m.message_type === 'video') { title = '视频播放'; html = `<video src="${url}" controls autoplay style="max-width:100%;max-height:75vh"></video>`; }
+  else if (m.message_type === 'voice') { title = `语音播放${m.voice_duration ? ` (${m.voice_duration}秒)` : ''}`; html = `<audio src="${url}" controls autoplay class="w-100"></audio>`; }
+  else return;
+  document.getElementById('mediaPreviewTitle').textContent = title;
+  document.getElementById('mediaPreviewBody').innerHTML = html;
+  const el = document.getElementById('mediaPreviewModal');
+  if (!el.dataset.cleanupBound) {
+    el.dataset.cleanupBound = '1';
+    el.addEventListener('hidden.bs.modal', () => { document.getElementById('mediaPreviewBody').innerHTML = ''; });
+  }
+  new bootstrap.Modal(el).show();
+};
+
+// 文件消息：点击直接下载（fetch 转 blob 强制触发下载；OSS 跨域拒绝时回退为新窗口打开）
+const downloadMsgFile = async (listType, id) => {
+  const m = (listType === 'pm' ? pmData : gmData).find(x => String(x.id) === String(id));
+  if (!m || !m.content) return;
+  const name = m.file_name || (m.content.split('/').pop() || '文件').split('?')[0];
+  try {
+    const resp = await fetch(m.content);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  } catch (e) {
+    window.open(m.content, '_blank');
+  }
+};
+
+const matchUserIdByInput = (value) => {
+  if (!value) return '';
+  const user = allUsers.find(u => `${u.username}${u.full_name ? ' (' + u.full_name + ')' : ''}` === value);
+  return user ? user.id : '';
+};
+
+const userDatalistHtml = (listId) =>
+  `<datalist id="${listId}">${allUsers.map(u => `<option value="${esc(u.username)}${u.full_name ? ' (' + esc(u.full_name) + ')' : ''}"></option>`).join('')}</datalist>`;
+
+// ---- 单聊记录 ----
+let pmPage = 1, pmPageSize = 20, pmData = [];
+let pmFilter = { keyword: '', senderId: '', receiverId: '', messageType: '', status: '', startDate: '', endDate: '' };
+
+const loadPrivateMsgs = async (container) => {
+  await loadFilterOptions();
+  const params = new URLSearchParams({ page: pmPage, limit: pmPageSize });
+  if (pmFilter.keyword) params.append('keyword', pmFilter.keyword);
+  if (pmFilter.senderId) params.append('sender_id', pmFilter.senderId);
+  if (pmFilter.receiverId) params.append('receiver_id', pmFilter.receiverId);
+  if (pmFilter.messageType) params.append('message_type', pmFilter.messageType);
+  if (pmFilter.status) params.append('status', pmFilter.status);
+  if (pmFilter.startDate) params.append('start_date', pmFilter.startDate);
+  if (pmFilter.endDate) params.append('end_date', pmFilter.endDate);
+
+  const res = await api(`/messages/private?${params}`);
+  pmData = res.data || [];
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">单聊记录</h5>
+        <span class="badge bg-info">共 ${res.total} 条</span>
+      </div>
+      <div class="card-body">
+        <div class="row mb-3 g-2">
+          <div class="col-md-2">
+            <input type="text" class="form-control" list="pmSenderList" placeholder="发送人" autocomplete="off"
+              value="${esc(getSelectedUserName(pmFilter.senderId, allUsers))}"
+              onchange="pmFilter.senderId=matchUserIdByInput(this.value);pmPage=1;loadPage()">
+            ${userDatalistHtml('pmSenderList')}
+          </div>
+          <div class="col-md-2">
+            <input type="text" class="form-control" list="pmReceiverList" placeholder="接收人" autocomplete="off"
+              value="${esc(getSelectedUserName(pmFilter.receiverId, allUsers))}"
+              onchange="pmFilter.receiverId=matchUserIdByInput(this.value);pmPage=1;loadPage()">
+            ${userDatalistHtml('pmReceiverList')}
+          </div>
+          <div class="col-md-2"><input type="text" class="form-control" placeholder="内容关键字" value="${esc(pmFilter.keyword)}" onchange="pmFilter.keyword=this.value;pmPage=1;loadPage()"></div>
+          <div class="col-md-1"><select class="form-select" onchange="pmFilter.messageType=this.value;pmPage=1;loadPage()">${msgTypeOptions(pmFilter.messageType)}</select></div>
+          <div class="col-md-1"><select class="form-select" onchange="pmFilter.status=this.value;pmPage=1;loadPage()">${msgStatusOptions(pmFilter.status)}</select></div>
+          <div class="col-md-2"><input type="datetime-local" class="form-control" title="开始时间" value="${pmFilter.startDate}" onchange="pmFilter.startDate=this.value;pmPage=1;loadPage()"></div>
+          <div class="col-md-2"><input type="datetime-local" class="form-control" title="结束时间" value="${pmFilter.endDate}" onchange="pmFilter.endDate=this.value;pmPage=1;loadPage()"></div>
+          <div class="col-md-1"><button class="btn btn-outline-secondary w-100" onclick="resetPmFilter()">重置</button></div>
+        </div>
+        <table class="table table-hover">
+          <thead><tr><th style="width:70px">ID</th><th style="width:140px">发送人</th><th style="width:140px">接收人</th><th>内容</th><th style="width:70px">类型</th><th style="width:70px">状态</th><th style="width:150px">时间</th><th style="width:60px">操作</th></tr></thead>
+          <tbody>${pmData.map(m => `
+            <tr>
+              <td>${m.id}</td>
+              <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;line-height:1.25" title="${esc(pmUserTitle(m.sender_username, m.sender_fullname, m.sender_name))}">${pmUserCell(m.sender_username, m.sender_fullname, m.sender_name, m.sender_id)}</td>
+              <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;line-height:1.25" title="${esc(pmUserTitle(m.receiver_username, m.receiver_fullname, m.receiver_name))}">${pmUserCell(m.receiver_username, m.receiver_fullname, m.receiver_name, m.receiver_id)}</td>
+              <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${msgContentCell(m, 'pm')}</td>
+              <td><span class="badge bg-light text-dark border">${msgTypeLabel(m.message_type)}</span></td>
+              <td><span class="badge ${m.status === 'recalled' ? 'bg-warning text-dark' : 'bg-success'}">${m.status === 'recalled' ? '已撤回' : '正常'}</span></td>
+              <td>${toBeijingTime(m.created_at)}</td>
+              <td><button class="btn btn-sm btn-outline-primary" onclick="showMsgDetail('pm', ${m.id})" title="查看详情"><i class="bi bi-eye"></i></button></td>
+            </tr>`).join('') || '<tr><td colspan="8" class="text-center text-muted">暂无数据</td></tr>'}</tbody>
+        </table>
+        ${renderPagination(res, 'pmPage', 'loadPage', 'pmPageSize')}
+      </div>
+    </div>
+    <div class="modal fade" id="msgDetailModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">消息详情</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body" id="msgDetailBody"></div></div></div></div>
+    <div class="modal fade" id="mediaPreviewModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="mediaPreviewTitle">预览</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center" id="mediaPreviewBody"></div></div></div></div>`;
+};
+
+const resetPmFilter = () => {
+  pmFilter = { keyword: '', senderId: '', receiverId: '', messageType: '', status: '', startDate: '', endDate: '' };
+  pmPage = 1;
+  loadPage();
+};
+
+// ---- 群聊记录 ----
+let gmPage = 1, gmPageSize = 20, gmData = [];
+let gmFilter = { keyword: '', senderId: '', groupId: '', messageType: '', status: '', startDate: '', endDate: '' };
+
+const loadGroupMsgs = async (container) => {
+  await loadFilterOptions();
+  const params = new URLSearchParams({ page: gmPage, limit: gmPageSize });
+  if (gmFilter.keyword) params.append('keyword', gmFilter.keyword);
+  if (gmFilter.senderId) params.append('sender_id', gmFilter.senderId);
+  if (gmFilter.groupId) params.append('group_id', gmFilter.groupId);
+  if (gmFilter.messageType) params.append('message_type', gmFilter.messageType);
+  if (gmFilter.status) params.append('status', gmFilter.status);
+  if (gmFilter.startDate) params.append('start_date', gmFilter.startDate);
+  if (gmFilter.endDate) params.append('end_date', gmFilter.endDate);
+
+  const res = await api(`/messages/group-list?${params}`);
+  gmData = res.data || [];
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">群聊记录</h5>
+        <span class="badge bg-info">共 ${res.total} 条</span>
+      </div>
+      <div class="card-body">
+        <div class="row mb-3 g-2">
+          <div class="col-md-2">
+            <input type="text" class="form-control" list="gmGroupList" placeholder="群组" autocomplete="off"
+              value="${esc(getSelectedGroupName(gmFilter.groupId, allGroups))}"
+              onchange="gmFilter.groupId=matchGroupIdByInput(this.value);gmPage=1;loadPage()">
+            <datalist id="gmGroupList">${allGroups.map(g => `<option value="${esc(g.name)}"></option>`).join('')}</datalist>
+          </div>
+          <div class="col-md-2">
+            <input type="text" class="form-control" list="gmSenderList" placeholder="发送人" autocomplete="off"
+              value="${esc(getSelectedUserName(gmFilter.senderId, allUsers))}"
+              onchange="gmFilter.senderId=matchUserIdByInput(this.value);gmPage=1;loadPage()">
+            ${userDatalistHtml('gmSenderList')}
+          </div>
+          <div class="col-md-2"><input type="text" class="form-control" placeholder="内容关键字" value="${esc(gmFilter.keyword)}" onchange="gmFilter.keyword=this.value;gmPage=1;loadPage()"></div>
+          <div class="col-md-1"><select class="form-select" onchange="gmFilter.messageType=this.value;gmPage=1;loadPage()">${msgTypeOptions(gmFilter.messageType)}</select></div>
+          <div class="col-md-1"><select class="form-select" onchange="gmFilter.status=this.value;gmPage=1;loadPage()">${msgStatusOptions(gmFilter.status)}</select></div>
+          <div class="col-md-2"><input type="datetime-local" class="form-control" title="开始时间" value="${gmFilter.startDate}" onchange="gmFilter.startDate=this.value;gmPage=1;loadPage()"></div>
+          <div class="col-md-2"><input type="datetime-local" class="form-control" title="结束时间" value="${gmFilter.endDate}" onchange="gmFilter.endDate=this.value;gmPage=1;loadPage()"></div>
+          <div class="col-md-1"><button class="btn btn-outline-secondary w-100" onclick="resetGmFilter()">重置</button></div>
+        </div>
+        <table class="table table-hover">
+          <thead><tr><th style="width:70px">ID</th><th style="width:150px">群组</th><th style="width:140px">发送人</th><th>内容</th><th style="width:70px">类型</th><th style="width:70px">状态</th><th style="width:150px">时间</th><th style="width:60px">操作</th></tr></thead>
+          <tbody>${gmData.map(m => `
+            <tr>
+              <td>${m.id}</td>
+              <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.group_name)}">${esc(m.group_name || m.group_id)}</td>
+              <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.sender_name)}">${esc(m.sender_full_name || m.sender_name || m.sender_id)}</td>
+              <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${msgContentCell(m, 'gm')}</td>
+              <td><span class="badge bg-light text-dark border">${msgTypeLabel(m.message_type)}</span></td>
+              <td><span class="badge ${m.status === 'recalled' ? 'bg-warning text-dark' : 'bg-success'}">${m.status === 'recalled' ? '已撤回' : '正常'}</span></td>
+              <td>${toBeijingTime(m.created_at)}</td>
+              <td><button class="btn btn-sm btn-outline-primary" onclick="showMsgDetail('gm', ${m.id})" title="查看详情"><i class="bi bi-eye"></i></button></td>
+            </tr>`).join('') || '<tr><td colspan="8" class="text-center text-muted">暂无数据</td></tr>'}</tbody>
+        </table>
+        ${renderPagination(res, 'gmPage', 'loadPage', 'gmPageSize')}
+      </div>
+    </div>
+    <div class="modal fade" id="msgDetailModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">消息详情</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body" id="msgDetailBody"></div></div></div></div>
+    <div class="modal fade" id="mediaPreviewModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="mediaPreviewTitle">预览</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center" id="mediaPreviewBody"></div></div></div></div>`;
+};
+
+const resetGmFilter = () => {
+  gmFilter = { keyword: '', senderId: '', groupId: '', messageType: '', status: '', startDate: '', endDate: '' };
+  gmPage = 1;
+  loadPage();
+};
+
+const matchGroupIdByInput = (value) => {
+  if (!value) return '';
+  const group = allGroups.find(g => g.name === value);
+  return group ? group.id : '';
+};
+
+// 消息详情弹窗（单聊/群聊共用）
+const showMsgDetail = (type, id) => {
+  const m = (type === 'pm' ? pmData : gmData).find(x => String(x.id) === String(id));
+  if (!m) return;
+  const isGroup = type === 'gm';
+  let contentHtml;
+  if (m.message_type === 'image') contentHtml = `<img src="${esc(m.content)}" style="max-width:100%;max-height:400px" class="rounded">`;
+  else if (m.message_type === 'file') contentHtml = `<a href="javascript:void(0)" onclick="downloadMsgFile('${type}', ${m.id})" title="点击下载"><i class="bi bi-file-earmark-arrow-down"></i> ${esc(m.file_name || '文件')}</a>`;
+  else if (m.message_type === 'video') contentHtml = `<video src="${esc(m.content)}" controls style="max-width:100%;max-height:400px"></video>`;
+  else if (m.message_type === 'voice') contentHtml = `<audio src="${esc(m.content)}" controls></audio> ${m.voice_duration ? `(${m.voice_duration}秒)` : ''}`;
+  else contentHtml = `<div style="white-space:pre-wrap;word-break:break-all">${esc(m.content)}</div>`;
+
+  document.getElementById('msgDetailBody').innerHTML = `
+    <table class="table"><tbody>
+      <tr><th style="width:110px">消息 ID</th><td>${m.id}</td></tr>
+      ${isGroup
+        ? `<tr><th>群组</th><td>${esc(m.group_name || m.group_id)}</td></tr>
+           <tr><th>发送人</th><td>${esc(m.sender_full_name || m.sender_name || m.sender_id)} (ID: ${m.sender_id ?? '-'})</td></tr>`
+        : `<tr><th>发送人</th><td>${esc(m.sender_username || m.sender_name || '-')}${m.sender_fullname ? ` <span class="text-muted">(昵称: ${esc(m.sender_fullname)})</span>` : ''} (ID: ${m.sender_id})</td></tr>
+           <tr><th>接收人</th><td>${esc(m.receiver_username || m.receiver_name || '-')}${m.receiver_fullname ? ` <span class="text-muted">(昵称: ${esc(m.receiver_fullname)})</span>` : ''} (ID: ${m.receiver_id})</td></tr>`}
+      <tr><th>类型</th><td>${msgTypeLabel(m.message_type)} <code class="ms-1">${esc(m.message_type)}</code></td></tr>
+      <tr><th>状态</th><td>${m.status === 'recalled' ? '已撤回' : '正常'}</td></tr>
+      ${!isGroup ? `<tr><th>已读</th><td>${m.is_read ? '是' : '否'}</td></tr>` : ''}
+      ${m.quoted_message_content ? `<tr><th>引用消息</th><td>${esc(m.quoted_message_content)}</td></tr>` : ''}
+      <tr><th>时间</th><td>${toBeijingTime(m.created_at)}</td></tr>
+      <tr><th>内容</th><td>${contentHtml}</td></tr>
+    </tbody></table>`;
+  new bootstrap.Modal(document.getElementById('msgDetailModal')).show();
+};
+
+
 // 邀请码管理
 let codePage = 1, codeStatus = '', codePageSize = 10, codeCode = '', codeUsername = '', codeFullname = '', codeEmail = '';
 const loadInviteCodes = async (container) => {
@@ -595,7 +871,15 @@ const loadInviteCodes = async (container) => {
     </div></div></div>`;
 };
 
-const showGenerateModal = () => new bootstrap.Modal(document.getElementById('generateModal')).show();
+const showGenerateModal = () => {
+  const el = document.getElementById('generateModal');
+  // 无论以哪种方式关闭弹窗（关闭按钮、右上角X、ESC、点击遮罩），都清空结果并刷新列表
+  el.addEventListener('hidden.bs.modal', () => {
+    document.getElementById('generatedCodes').innerHTML = '';
+    loadPage();
+  }, { once: true });
+  new bootstrap.Modal(el).show();
+};
 
 const showEditCodeModal = (id, totalCount, usedCount, remark, code) => {
   document.getElementById('editCodeId').value = id;
@@ -646,9 +930,8 @@ const generateCodes = async (e) => {
 
 const closeGenerateModal = () => {
   const modal = bootstrap.Modal.getInstance(document.getElementById('generateModal'));
+  // 清空结果和刷新列表由 hidden.bs.modal 监听器统一处理
   if (modal) modal.hide();
-  document.getElementById('generatedCodes').innerHTML = '';
-  loadPage();
 };
 
 const copyToClipboard = (text) => { navigator.clipboard.writeText(text); alert('已复制到剪贴板'); };

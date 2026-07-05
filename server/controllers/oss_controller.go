@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"youdu-server/models"
-	"youdu-server/utils"
+	"telegram-server/models"
+	"telegram-server/utils"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/gin-gonic/gin"

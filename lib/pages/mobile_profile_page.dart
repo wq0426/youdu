@@ -4,11 +4,13 @@ import 'package:flutter/services.dart';
 import '../services/api_service.dart';
 import '../services/local_database_service.dart';
 import '../services/websocket_service.dart';
+import '../services/agora_chat_service.dart';
 import '../services/update_checker.dart';
 import '../services/notification_service.dart';
 import '../utils/storage.dart';
 import '../utils/logger.dart';
 import '../utils/app_localizations.dart';
+import '../theme/app_theme.dart';
 import '../widgets/change_password_dialog.dart';
 import '../widgets/mobile_customer_service_dialog.dart';
 import 'mobile_profile_view_page.dart';
@@ -279,6 +281,9 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
       await WebSocketService().disconnect(sendOfflineStatus: false);
       logger.debug('✅ WebSocket连接已断开');
 
+      // 登出 Agora Chat（即时通讯）
+      await AgoraChatService().logout();
+
       // 清除登录信息（token、userId、username）
       // 先获取当前用户ID，用于清除该用户的保存密码
       final currentUserId = await Storage.getUserId();
@@ -296,6 +301,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
 
       // 🔴 清除所有本地缓存
       logger.info('🗑️ 登出，开始清除所有本地缓存...');
+      MobileChatPage.stopGlobalCacheSync();
       MobileChatPage.clearAllCache();
       MobileContactsPage.clearAllCache();
       MobileHomePage.clearAllCache();
@@ -490,7 +496,10 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             Expanded(
               child: Text(
                 statusLabel,
-                style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                style: TextStyle(
+                  fontSize: 14,
+                  color: AppColors.of(context).primaryText,
+                ),
               ),
             ),
             if (isSelected)
@@ -628,8 +637,9 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   @override
   Widget build(BuildContext context) {
     final i18n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
     return Container(
-      color: const Color(0xFFEEF1F6),
+      color: c.scaffold,
       child: SingleChildScrollView(
         child: Column(
           children: [
@@ -638,7 +648,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             Container(
               margin: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: c.surface,
                 borderRadius: BorderRadius.circular(12),
                 boxShadow: [
                   BoxShadow(
@@ -667,7 +677,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                                   widget.department!,
                                   style: TextStyle(
                                     fontSize: 13,
-                                    color: Colors.grey[600],
+                                    color: c.secondaryText,
                                   ),
                                 ),
                               if (widget.department != null &&
@@ -676,10 +686,10 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                               // 用户显示名称和用户名
                               Text(
                                 _buildDisplayName(),
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 18,
                                   fontWeight: FontWeight.bold,
-                                  color: Colors.black87,
+                                  color: c.primaryText,
                                 ),
                               ),
                               const SizedBox(height: 6),
@@ -688,7 +698,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                                 '已登录',
                                 style: TextStyle(
                                   fontSize: 13,
-                                  color: Colors.grey[600],
+                                  color: c.secondaryText,
                                 ),
                               ),
                             ],
@@ -758,7 +768,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                     ),
                   ),
                   // 分隔线
-                  Divider(height: 1, color: Colors.grey[200]),
+                  Divider(height: 1, color: c.divider),
                   // 编辑签名区域
                   InkWell(
                     onTap: _showEditWorkSignatureDialog,
@@ -771,7 +781,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                         children: [
                           Icon(
                             Icons.edit_outlined,
-                            color: Colors.grey[600],
+                            color: c.secondaryText,
                             size: 20,
                           ),
                           const SizedBox(width: 12),
@@ -785,8 +795,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                               style: TextStyle(
                                 fontSize: 14,
                                 color: _workSignature.isNotEmpty
-                                    ? Colors.black87
-                                    : Colors.grey[600],
+                                    ? c.primaryText
+                                    : c.secondaryText,
                               ),
                             ),
                           ),
@@ -801,7 +811,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
 
             // 菜单列表 - 第一组
             Container(
-              color: Colors.white,
+              color: c.surface,
               child: Column(
                 children: [
                   _buildMenuItem(
@@ -840,10 +850,10 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                           style: const TextStyle(fontSize: 14),
                         ),
                         const SizedBox(width: 8),
-                        const Icon(
+                        Icon(
                           Icons.chevron_right,
                           size: 20,
-                          color: Colors.grey,
+                          color: c.secondaryText,
                         ),
                       ],
                     ),
@@ -867,7 +877,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             const SizedBox(height: 8),
             // 菜单列表 - 第二组
             Container(
-              color: Colors.white,
+              color: c.surface,
               child: Column(
                 children: [
                   _buildMenuItem(
@@ -916,7 +926,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             const SizedBox(height: 8),
             // 切换账号按钮
             Container(
-              color: Colors.white,
+              color: c.surface,
               child: _buildMenuItem(
                 icon: Icons.swap_horiz,
                 title: i18n.translate('switch_account'),
@@ -927,7 +937,7 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             const SizedBox(height: 8),
             // 登出按钮（退出应用）
             Container(
-              color: Colors.white,
+              color: c.surface,
               child: _buildMenuItem(
                 icon: Icons.logout,
                 title: i18n.translate('logout'),
@@ -952,20 +962,21 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
     bool isLast = false,
     required VoidCallback onTap,
   }) {
+    final c = AppColors.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: c.surface,
         border: isLast
             ? null
-            : Border(bottom: BorderSide(color: Colors.grey[300]!, width: 1)),
+            : Border(bottom: BorderSide(color: c.divider, width: 1)),
       ),
       child: ListTile(
         leading: Icon(icon, color: iconColor),
-        title: Text(title, style: TextStyle(color: titleColor)),
+        title: Text(title, style: TextStyle(color: titleColor ?? c.primaryText)),
         subtitle: subtitle != null ? Text(subtitle) : null,
         trailing:
             trailing ??
-            const Icon(Icons.chevron_right, size: 20, color: Colors.grey),
+            Icon(Icons.chevron_right, size: 20, color: c.secondaryText),
         onTap: onTap,
       ),
     );

@@ -4,6 +4,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/api_service.dart';
 import '../services/agora_service.dart';
+import '../services/websocket_service.dart';
+import '../utils/storage.dart';
 import '../utils/logger.dart';
 
 /// 移动端个人资料编辑页面
@@ -176,6 +178,12 @@ class _MobileProfileEditPageState extends State<MobileProfileEditPage> {
             } catch (e) {
               logger.debug('⚠️ 同步头像到腾讯 IM 失败: $e');
             }
+
+            // 🔴 本地立即刷新自身头像：
+            // 1) 写入本地缓存，保证之后发出的消息携带的是新头像；
+            // 2) 广播本地 avatar_updated 事件，复用现有全链路刷新逻辑，
+            //    让本端会话列表 / 聊天历史里的头像立即更新，无需等待新消息驱动。
+            await _refreshLocalAvatar(url);
           }
           
           ScaffoldMessenger.of(context).showSnackBar(
@@ -203,6 +211,25 @@ class _MobileProfileEditPageState extends State<MobileProfileEditPage> {
           SnackBar(content: Text('头像上传失败: $e')),
         );
       }
+    }
+  }
+
+  // 🔴 修改自己头像后，本端立即刷新（缓存 + 数据库 + 会话列表 + 聊天历史）
+  Future<void> _refreshLocalAvatar(String url) async {
+    try {
+      // 1) 更新本地缓存的自身头像，保证之后发出的消息 ext 带的是新头像
+      await Storage.saveAvatar(url);
+
+      // 2) 复用服务端 avatar_updated 的整套本地刷新逻辑
+      final userId = await Storage.getUserId();
+      if (userId != null) {
+        WebSocketService().broadcastLocalAvatarUpdated(userId, url);
+        logger.debug('🎭 已本地广播自身头像更新事件 - userId=$userId');
+      } else {
+        logger.debug('⚠️ 本地头像刷新失败：无法获取当前用户ID');
+      }
+    } catch (e) {
+      logger.debug('⚠️ 本地头像刷新失败: $e');
     }
   }
 

@@ -31,7 +31,7 @@ Write-Host "Step 1/3: Delete Application Data Directories" -ForegroundColor Gree
 Write-Host "--------------------------------------------" -ForegroundColor Gray
 
 $dbPath1 = "$env:LOCALAPPDATA\ydapp"
-$dbPath2 = "$env:USERPROFILE\Documents\youdu_db"
+$dbPath2 = "$env:USERPROFILE\Documents\telegram_db"
 $deletedCount = 0
 
 if (Test-Path $dbPath1) {
@@ -139,10 +139,10 @@ Write-Host "   2. Restart the application (will trigger UUID push)" -ForegroundC
 Write-Host "       flutter run -d windows --debug" -ForegroundColor Gray
 Write-Host ""
 Write-Host "   3. Check logs to confirm UUID push success" -ForegroundColor White
-Write-Host "       Client logs: logs\youdu_XX_YYYY-MM-DD.log" -ForegroundColor Gray
+Write-Host "       Client logs: logs\telegram_XX_YYYY-MM-DD.log" -ForegroundColor Gray
 Write-Host "       Search keywords: 'old version upgrade detected' or 'device info push success'" -ForegroundColor Gray
 Write-Host ""
-Write-Host "       Server logs: server\logs\youdu-server_YYYY-MM-DD.log" -ForegroundColor Gray
+Write-Host "       Server logs: server\logs\telegram-server_YYYY-MM-DD.log" -ForegroundColor Gray
 Write-Host "       Search keywords: '[device registration]' or 'registration success'" -ForegroundColor Gray
 Write-Host ""
 Write-Host "   4. Verify database records" -ForegroundColor White

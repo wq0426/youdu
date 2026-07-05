@@ -15,6 +15,8 @@ class RecentContactModel {
   final String? remark; // 用户对群组的备注（仅当type为group时有值）
   final bool doNotDisturb; // 消息免打扰（一对一单聊和群组均有效）
   final bool hasMentionedMe; // 群组中是否有人@我（仅群组消息有效）
+  final bool lastMessageFromMe; // 最后一条消息是否为当前用户发出（会话列表显示发送状态对勾用）
+  final bool lastMessageRead; // 最后一条消息（自己发出时）对方是否已读（单勾/双勾）
 
   RecentContactModel({
     this.type = 'user', // 默认为用户类型
@@ -32,6 +34,8 @@ class RecentContactModel {
     this.remark,
     this.doNotDisturb = false, // 默认不免打扰
     this.hasMentionedMe = false, // 默认没有被@
+    this.lastMessageFromMe = false,
+    this.lastMessageRead = false,
   });
 
   /// 创建群组类型的最近联系人
@@ -116,8 +120,12 @@ class RecentContactModel {
       remark: json['remark']?.toString(),
       doNotDisturb: json['do_not_disturb'] == true || 
           json['do_not_disturb']?.toString() == 'true',
-      hasMentionedMe: json['has_mentioned_me'] == true || 
+      hasMentionedMe: json['has_mentioned_me'] == true ||
           json['has_mentioned_me']?.toString() == 'true',
+      lastMessageFromMe: json['last_message_from_me'] == true ||
+          json['last_message_from_me']?.toString() == 'true',
+      lastMessageRead: json['last_message_read'] == true ||
+          json['last_message_read']?.toString() == 'true',
     );
   }
 
@@ -139,6 +147,8 @@ class RecentContactModel {
       if (remark != null) 'remark': remark,
       'do_not_disturb': doNotDisturb,
       'has_mentioned_me': hasMentionedMe,
+      'last_message_from_me': lastMessageFromMe,
+      'last_message_read': lastMessageRead,
     };
   }
 
@@ -159,6 +169,8 @@ class RecentContactModel {
     String? remark,
     bool? doNotDisturb,
     bool? hasMentionedMe,
+    bool? lastMessageFromMe,
+    bool? lastMessageRead,
   }) {
     return RecentContactModel(
       type: type ?? this.type,
@@ -176,6 +188,8 @@ class RecentContactModel {
       remark: remark ?? this.remark,
       doNotDisturb: doNotDisturb ?? this.doNotDisturb,
       hasMentionedMe: hasMentionedMe ?? this.hasMentionedMe,
+      lastMessageFromMe: lastMessageFromMe ?? this.lastMessageFromMe,
+      lastMessageRead: lastMessageRead ?? this.lastMessageRead,
     );
   }
 

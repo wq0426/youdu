@@ -11,6 +11,9 @@ import adminRoutes from './routes/admins';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+// 🔒 默认只监听本机回环：管理后台不直接暴露公网，
+// 外部访问应经 Nginx 反代（或 SSH 隧道）。需要监听所有网卡时在 .env 设 HOST=0.0.0.0
+const HOST = process.env.HOST || '127.0.0.1';
 
 app.use(cors());
 app.use(express.json());
@@ -39,8 +42,8 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 const start = async () => {
   await initDatabase();
-  app.listen(PORT, () => {
-    console.log(`Admin server running on http://localhost:${PORT}`);
+  app.listen(Number(PORT), HOST, () => {
+    console.log(`Admin server running on http://${HOST}:${PORT}`);
   });
 };
 

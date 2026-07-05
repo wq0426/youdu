@@ -4,12 +4,12 @@ import (
 	"database/sql"
 	"time"
 
-	"youdu-server/config"
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/services"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/config"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/services"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 
 	"github.com/gin-gonic/gin"
 )

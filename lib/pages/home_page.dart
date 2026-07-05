@@ -26,7 +26,10 @@ import '../widgets/user_info_dialog_simple.dart';
 import '../widgets/edit_profile_dialog.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
+import '../services/agora_chat_service.dart';
+import 'package:agora_chat_sdk/agora_chat_sdk.dart';
 import '../services/video_upload_service.dart';
+import '../services/media_cache_service.dart';
 import '../services/message_service.dart';
 import '../services/local_database_service.dart';
 import '../services/app_initialization_service.dart';
@@ -70,7 +73,6 @@ import '../utils/sort_helper.dart';
 import 'mobile_home_page.dart';
 import '../services/update_checker.dart';
 import '../services/message_position_cache.dart'; // 消息位置缓存服务
-import '../services/message_sync_service.dart'; // 消息同步服务
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -107,6 +109,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   final WebSocketService _wsService = WebSocketService();
   StreamSubscription<Map<String, dynamic>>?
   _messageSubscription; // WebSocket消息订阅
+  StreamSubscription<List<ChatMessage>>?
+  _agoraMessageSubscription; // Agora Chat 消息订阅（私聊文本）
+  StreamSubscription<List<ChatMessage>>? _agoraRecallSubscription; // 阶段4：撤回
+  StreamSubscription<List<ChatMessage>>? _agoraReadSubscription; // 阶段4：已读回执
+  StreamSubscription<List<ChatMessage>>? _agoraCmdSubscription; // 阶段4：正在输入
   // 条件初始化 Agora 服务（替代 WebRTC）
   late final AgoraService? _agoraService = FeatureConfig.enableWebRTC
       ? AgoraService()
@@ -419,9 +426,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       // 原因：check-sync 轮询会导致客户端重复收到已通过 WebSocket 实时推送的消息
       // 现在改为由服务器B的定时任务（每5秒）扫描Redis中未保存的消息并重发给服务器A
       if (_currentUserId > 0) {
-        // MessageSyncService().startPeriodicSync(_currentUserId);
-        // logger.debug('✅ 消息同步服务已启动，用户ID: $_currentUserId');
-        logger.debug('ℹ️ 消息同步服务已屏蔽（改为服务器B定时任务处理），用户ID: $_currentUserId');
+        // 🔵 阶段6：MessageSyncService 已删除（消息改走 Agora Chat）。
+        logger.debug('ℹ️ 旧消息同步服务已下线（消息走 Agora Chat），用户ID: $_currentUserId');
       }
 
       // 5. 初始化Agora服务（需要在用户ID加载完成后）
@@ -581,15 +587,17 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     _avatarCache.clear();
     logger.debug('🗑️ 应用关闭时已清除头像缓存');
     
-    // 停止消息同步服务
-    MessageSyncService().stopPeriodicSync();
-    logger.debug('🛑 消息同步服务已停止');
+    // 🔵 阶段6：MessageSyncService 已删除（消息改走 Agora Chat），无需停止旧同步服务。
     
     // 移除窗口监听器（仅限桌面平台）
     if (!Platform.isAndroid && !Platform.isIOS) {
       windowManager.removeListener(this);
     }
     _messageSubscription?.cancel(); // 取消WebSocket消息订阅
+    _agoraMessageSubscription?.cancel(); // 取消 Agora Chat 消息订阅
+    _agoraRecallSubscription?.cancel(); // 阶段4
+    _agoraReadSubscription?.cancel(); // 阶段4
+    _agoraCmdSubscription?.cancel(); // 阶段4
     _wsService.disconnect();
     // 停止响铃和震动
     _stopRingtone();
@@ -963,6 +971,22 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         cancelOnError: false,
       );
 
+      // 监听 Agora Chat 私聊消息（替代自建 WebSocket 的文本收发）
+      _agoraMessageSubscription?.cancel();
+      _agoraMessageSubscription =
+          AgoraChatService().messageStream.listen(_handleAgoraChatMessages);
+
+      // 阶段4：撤回 / 已读回执 / 正在输入
+      _agoraRecallSubscription?.cancel();
+      _agoraRecallSubscription =
+          AgoraChatService().recallStream.listen(_handleAgoraRecall);
+      _agoraReadSubscription?.cancel();
+      _agoraReadSubscription =
+          AgoraChatService().readStream.listen(_handleAgoraRead);
+      _agoraCmdSubscription?.cancel();
+      _agoraCmdSubscription =
+          AgoraChatService().cmdStream.listen(_handleAgoraCmd);
+
       // 连接成功后，发送在线状态
       try {
         await _wsService.sendStatusChange('online');
@@ -1113,9 +1137,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       }
 
       if (error == '对方拒绝了通话' && targetUserId != null && targetUserId != 0) {
-        logger.debug('📞 对方拒绝了通话，发送拒绝消息给: $targetUserId');
-        // 发起方收到拒绝通知，显示"对方已拒绝"
-        _sendCallRejectedMessage(targetUserId, isRejecter: false);
+        // 🔴 拒绝消息统一由拒绝方发送，发起方通过聊天消息接收，此处不再发送
+        // （发起方发的消息会被拒绝方渲染成"对方已拒绝"，且造成重复消息）
+        logger.debug('📞 对方拒绝了通话（拒绝消息由拒绝方发送，此处不发送）');
       }
     };
 
@@ -1665,15 +1689,25 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
   /// 开始播放来电铃声和震动
   void _startRingtone() async {
+    // 🔴 已在响铃则直接返回，避免重复创建播放器/定时器：
+    // 旧实例被覆盖后无人引用，_stopRingtone 停不掉，导致接听/挂断后铃声仍在循环
+    if (_ringtonePlayer != null) return;
+    final player = AudioPlayer();
+    _ringtonePlayer = player;
     try {
       // 播放铃声
-      _ringtonePlayer = AudioPlayer();
-      await _ringtonePlayer!.setReleaseMode(ReleaseMode.loop); // 循环播放
-      await _ringtonePlayer!.play(AssetSource('mp3/wait.mp3'));
+      await player.setReleaseMode(ReleaseMode.loop); // 循环播放
+      await player.play(AssetSource('mp3/wait.mp3'));
       logger.debug('🔔 开始播放来电铃声');
+      // 🔴 播放启动期间可能已被 _stopRingtone 停止（接听/拒接先到），此时立即停掉
+      if (_ringtonePlayer != player) {
+        await player.stop();
+        await player.dispose();
+        return;
+      }
 
       // PC端也使用震动（如果支持）
-      _vibrationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _vibrationTimer ??= Timer.periodic(const Duration(seconds: 1), (timer) {
         HapticFeedback.heavyImpact(); // 重震动
         logger.debug('📳 触发震动');
       });
@@ -3173,6 +3207,20 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       return;
     }
 
+    // 检查是否已通过好友验证（服务器现在会返回我发起的待验证请求）
+    if (!contactModel.isApproved) {
+      logger.debug('📞 ⚠️ 对方尚未通过好友验证，无法发起语音通话');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(
+          content: Text('对方尚未通过好友验证，无法发起通话'),
+          backgroundColor: Colors.orange,
+        ));
+      }
+      return;
+    }
+
     // 检WebRTC 功能是否启用
     if (!FeatureConfig.enableWebRTC) {
       if (mounted) {
@@ -3309,14 +3357,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           }
         }
 
-        // 如果通话被拒绝，发送通话拒绝消息（发起方收到拒绝通知，显示"对方已拒绝"）
+        // 🔴 通话被拒绝：拒绝消息统一由拒绝方发送，发起方不再发送
         if (result is Map && result['callRejected'] == true) {
-          // 从返回值中获取通话类型
-          final returnedCallType = result['callType'] as CallType?;
-          if (returnedCallType != null) {
-            _currentCallType = returnedCallType;
-          }
-          await _sendCallRejectedMessage(contact.userId, isRejecter: false);
+          logger.debug('📞 [PC] 通话被拒绝（拒绝消息由拒绝方发送，此处不发送）');
         }
         // 如果通话被取消，发送通话取消消息（发起方取消，显示"已取消"）
         else if (result is Map && result['callCancelled'] == true) {
@@ -3390,6 +3433,20 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           context,
         ).showSnackBar(const SnackBar(
           content: Text('该联系人已被拉黑，无法发起通话'),
+          backgroundColor: Colors.orange,
+        ));
+      }
+      return;
+    }
+
+    // 检查是否已通过好友验证（服务器现在会返回我发起的待验证请求）
+    if (!contactModel.isApproved) {
+      logger.debug('📹 ⚠️ 对方尚未通过好友验证，无法发起视频通话');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(
+          content: Text('对方尚未通过好友验证，无法发起通话'),
           backgroundColor: Colors.orange,
         ));
       }
@@ -3478,9 +3535,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           }
         }
 
-        // 如果通话被拒绝，发送通话拒绝消息（发起方收到拒绝通知，显示"对方已拒绝"）
+        // 🔴 通话被拒绝：拒绝消息统一由拒绝方发送，发起方不再发送
         if (result is Map && result['callRejected'] == true) {
-          await _sendCallRejectedMessage(contact.userId, isRejecter: false);
+          logger.debug('📞 [PC] 通话被拒绝（拒绝消息由拒绝方发送，此处不发送）');
         }
         // 如果通话被取消，发送通话取消消息（发起方取消，显示"已取消"）
         else if (result is Map && result['callCancelled'] == true) {
@@ -3534,37 +3591,136 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   }
 
   // 处理WebSocket消息
+  /// 处理 Agora Chat 收到的消息（阶段1：1对1；阶段3：群聊）
+  void _handleAgoraChatMessages(List<ChatMessage> messages) {
+    if (!mounted) return;
+
+    bool changed = false;
+    for (final chatMsg in messages) {
+      bool belongsToCurrentChat;
+      if (chatMsg.chatType == ChatType.Chat) {
+        final peerId = int.tryParse(chatMsg.from ?? '') ?? 0;
+        belongsToCurrentChat =
+            !_isCurrentChatGroup && _currentChatUserId == peerId;
+      } else if (chatMsg.chatType == ChatType.GroupChat) {
+        final agoraGid = chatMsg.conversationId ?? chatMsg.to ?? '';
+        final localGid = AgoraChatService().localGroupIdFor(agoraGid) ??
+            int.tryParse(agoraGid);
+        belongsToCurrentChat =
+            _isCurrentChatGroup && _currentChatUserId == localGid;
+      } else {
+        continue;
+      }
+
+      // 非当前会话：刷新最近联系人列表即可
+      if (!belongsToCurrentChat) {
+        _loadRecentContacts();
+        continue;
+      }
+
+      final model = AgoraChatService.chatMessageToModel(chatMsg);
+
+      // 通话系统消息（XX发起了语音/视频通话）实时展示走服务器 WS 帧，
+      // 这条 Agora 副本只用于持久化历史，实时到达时跳过避免重复上屏
+      if (AgoraChatService.callSystemMessageTypes.contains(model.messageType)) {
+        continue;
+      }
+      // 群通话结束消息（通话时长/发起人已取消）同理；
+      // 单聊的 call_ended 是接收方唯一展示路径，不能跳过，故限定群消息
+      if (chatMsg.chatType == ChatType.GroupChat &&
+          AgoraChatService.groupCallEndedMessageTypes
+              .contains(model.messageType)) {
+        continue;
+      }
+
+      final exists = _messages.any(
+        (m) => m.agoraMsgId != null && m.agoraMsgId == model.agoraMsgId,
+      );
+      if (exists) continue;
+
+      _messages.add(model);
+      changed = true;
+    }
+
+    if (changed) {
+      setState(() {});
+      _scrollToBottom();
+      _loadRecentContacts();
+    }
+  }
+
+  /// 阶段4：撤回——把对应消息标记为已撤回
+  void _handleAgoraRecall(List<ChatMessage> messages) {
+    if (!mounted) return;
+    bool changed = false;
+    for (final m in messages) {
+      final idx = _messages.indexWhere(
+          (x) => x.agoraMsgId != null && x.agoraMsgId == m.msgId);
+      if (idx != -1 && _messages[idx].status != 'recalled') {
+        _messages[idx] = _messages[idx].copyWith(status: 'recalled');
+        changed = true;
+      }
+    }
+    if (changed) {
+      setState(() {});
+      _loadRecentContacts();
+    }
+  }
+
+  /// 阶段4：已读回执——把我发出且被对端读过的消息标记为已读（单聊）
+  void _handleAgoraRead(List<ChatMessage> messages) {
+    if (!mounted || _isCurrentChatGroup) return;
+    bool changed = false;
+    for (final m in messages) {
+      final idx = _messages.indexWhere(
+          (x) => x.agoraMsgId != null && x.agoraMsgId == m.msgId);
+      if (idx != -1) {
+        if (!_messages[idx].isRead) {
+          _messages[idx] =
+              _messages[idx].copyWith(isRead: true, readAt: DateTime.now());
+          changed = true;
+        }
+      } else {
+        // 会话级已读：把我发出、尚未读的消息全部置为已读
+        for (var i = 0; i < _messages.length; i++) {
+          if (_messages[i].senderId == _currentUserId && !_messages[i].isRead) {
+            _messages[i] =
+                _messages[i].copyWith(isRead: true, readAt: DateTime.now());
+            changed = true;
+          }
+        }
+      }
+    }
+    if (changed) setState(() {});
+  }
+
+  /// 阶段4：正在输入——收到当前会话对端 typing 命令消息时显示提示
+  void _handleAgoraCmd(List<ChatMessage> messages) {
+    if (!mounted) return;
+    for (final m in messages) {
+      final body = m.body;
+      if (body is! ChatCmdMessageBody) continue;
+      if (body.action != AgoraChatService.typingAction) continue;
+      if (_isCurrentChatGroup) continue; // 桌面端仅单聊显示输入态
+      if (m.chatType != ChatType.Chat) continue;
+      final peerId = int.tryParse(m.from ?? '') ?? 0;
+      if (peerId != _currentChatUserId) continue;
+      setState(() => _isOtherTyping = true);
+      _otherTypingTimer?.cancel();
+      _otherTypingTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _isOtherTyping = false);
+      });
+    }
+  }
+
   void _handleWebSocketMessage(Map<String, dynamic> message) {
     final type = message['type'] as String?;
 
     logger.debug('🖥️ [PC端] 收到WebSocket消息 - 类型: $type, 数据: ${message['data']}');
 
     switch (type) {
-      case 'message':
-        // 接收到新消息
-        _handleNewMessage(message['data']);
-        break;
-      case 'offline_messages':
-        // 接收到离线消息列
-        final offlineMsgs = message['data'] as List<dynamic>?;
-        logger.debug('📨 [诊断] 收到离线私聊消息: ${offlineMsgs?.length ?? 0} 条');
-        if (offlineMsgs != null && offlineMsgs.isNotEmpty) {
-          logger.debug('📨 [诊断] 第一条离线消息: ${offlineMsgs.first}');
-          logger.debug('⚠️ [诊断] 离线消息未处理，将不会保存到本地数据库');
-        }
-        // TODO: 批量显示离线消息
-        break;
-      case 'offline_group_messages':
-        // 接收到离线群组消息
-        final groupData = message['data'] as Map<String, dynamic>?;
-        final groupId = groupData?['group_id'];
-        final groupMsgs = groupData?['messages'] as List<dynamic>?;
-        logger.debug('📨 [诊断] 收到群组 $groupId 的离线消息: ${groupMsgs?.length ?? 0} 条');
-        if (groupMsgs != null && groupMsgs.isNotEmpty) {
-          logger.debug('📨 [诊断] 第一条群组离线消息: ${groupMsgs.first}');
-          logger.debug('⚠️ [诊断] 群组离线消息未处理，将不会保存到本地数据库');
-        }
-        break;
+      // 🔵 阶段6：私聊 'message' 帧已迁移到 Agora Chat；离线投递改由 Agora 承担，
+      // 'offline_messages'/'offline_group_messages' 帧已下线，处理已删除。
       case 'message_sent':
         // 消息发送成功确
         logger.debug('消息发送成 ${message['data']}');
@@ -3603,10 +3759,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         // 收到删除消息通知
         _handleDeleteMessageNotification(message['data']);
         break;
-      case 'update_message_type':
-        // 🔴 处理消息类型更新通知（通话结束后将按钮消息转换为普通系统消息）
-        _handleUpdateMessageType(message['data']);
-        break;
+      // 🔵 阶段6：'update_message_type' 服务端产生方已删除（按钮改为 delete_message 删除），处理已删除。
       case 'group_call_notification':
         // 接收到群组通话通知
         _handleGroupCallNotification(message['data']);
@@ -3668,10 +3821,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         // 接收到被恢复通知
         _handleContactUnblocked(message['data']);
         break;
-      case 'read_receipt':
-        // 🔴 修复：接收到已读回执
-        _handleReadReceipt(message['data']);
-        break;
+      // 🔵 阶段6：已读回执改走 Agora（onMessagesRead），WS 'read_receipt' 不再下发，处理已删除。
       case 'recall_success':
         // 撤回消息成功确认
         logger.debug('✅ 消息撤回成功: ${message['data']}');
@@ -3733,7 +3883,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
     
     // 🔴 更新未读数量（如果是接收方且是通过消息）
-    if (isReceiver && content == '请求添加好友【已通过】') {
+    if (isReceiver && (content == '请求添加好友【已通过】' || content == '发起添加好友申请')) {
       logger.debug('📢 [PC端] 好友审核通过，准备刷新会话列表');
       // 延迟一小段时间，确保数据库操作完成后再刷新
       await Future.delayed(const Duration(milliseconds: 100));
@@ -3901,8 +4051,12 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
       // 🔴 特殊处理：如果是好友审核消息，跳过_handleNewMessage的处理
       // 因为这类消息会通过clear_chat_history事件单独处理
-      if (content == '请求添加好友【已通过】' || content == '请求添加好友【已驳回】') {
-        logger.debug('📨 检测到好友审核消息，跳过_handleNewMessage处理，由clear_chat_history事件处理');
+      if (content == '请求添加好友【已通过】' || content == '请求添加好友【已驳回】' || content == '发起添加好友申请') {
+        // 🔴 修复：审核消息到达时 Agora 会话已建立，直接刷新会话列表以动态显示新好友会话。
+        // 不能只 return：原依赖的 contact_status_changed 刷新与 Agora 消息到达存在竞态，
+        // 刷新常跑在 Agora 会话就绪之前 → 新会话不出现，需手动刷新才显示。
+        logger.debug('📨 检测到好友审核消息，跳过弹窗但刷新会话列表以动态显示新会话');
+        unawaited(_loadRecentContacts());
         return;
       }
 
@@ -5187,17 +5341,16 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         orElse: () => message,
       );
 
-      // 🔴 修复：必须使用服务器ID进行撤回
-      final serverMessageId = latestMessage.serverId;
-      logger.debug('📤 [撤回消息] 本地ID: ${latestMessage.id}, 服务器ID: ${latestMessage.serverId}');
+      // 🔵 阶段4：以 agoraMsgId 撤回
+      final agoraMsgId = latestMessage.agoraMsgId;
+      logger.debug('📤 [撤回消息] 本地ID: ${latestMessage.id}, agoraMsgId: $agoraMsgId');
 
-      // 🔴 检查是否有服务器ID
-      if (serverMessageId == null) {
-        logger.debug('⚠️ [撤回消息] 消息没有服务器ID，无法撤回');
+      if (agoraMsgId == null || agoraMsgId.isEmpty) {
+        logger.debug('⚠️ [撤回消息] 消息没有 agoraMsgId，无法撤回');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('消息尚未同步到服务器，无法撤回'),
+              content: Text('消息尚未同步，无法撤回'),
               backgroundColor: Colors.orange,
               duration: Duration(seconds: 2),
             ),
@@ -5232,60 +5385,27 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
       if (confirmed != true) return;
 
-      final response = await ApiService.recallMessage(
-        token: token,
-        messageId: latestMessage.id, // 本地数据库使用本地ID
-      );
+      final ok = await AgoraChatService().recallMessage(agoraMsgId);
 
       if (mounted) {
-        if (response['code'] == 0) {
-          // 更新本地消息状态为已撤回，而不是删
+        if (ok) {
+          // 更新本地消息状态为已撤回（对端由 onMessagesRecalled 同步）
           setState(() {
             final index = _messages.indexWhere((msg) => msg.id == latestMessage.id);
             if (index != -1) {
-              // 创建一个新的消息对象，标记为已撤回
-              _messages[index] = MessageModel(
-                id: latestMessage.id,
-                serverId: latestMessage.serverId, // 🔴 保留serverId
-                senderId: latestMessage.senderId,
-                receiverId: latestMessage.receiverId,
-                senderName: latestMessage.senderName,
-                receiverName: latestMessage.receiverName,
-                senderAvatar: latestMessage.senderAvatar,
-                receiverAvatar: latestMessage.receiverAvatar,
-                senderNickname: latestMessage.senderNickname,
-                senderFullName: latestMessage.senderFullName,
-                receiverFullName: latestMessage.receiverFullName,
-                content: latestMessage.content,
-                messageType: latestMessage.messageType,
-                fileName: latestMessage.fileName,
-                quotedMessageId: latestMessage.quotedMessageId,
-                quotedMessageContent: latestMessage.quotedMessageContent,
-                status: 'recalled', // 标记为已撤回
-                isRead: latestMessage.isRead,
-                createdAt: latestMessage.createdAt,
-                readAt: latestMessage.readAt,
-              );
+              _messages[index] = latestMessage.copyWith(status: 'recalled');
             }
           });
-
-          // 🔴 修复：通过WebSocket通知服务器和其他客户端
-          await _wsService.sendMessageRecall(
-            messageId: serverMessageId, // 服务器使用服务器ID
-            userId: _currentChatUserId ?? 0, // _currentChatUserId 存储用户ID或群组ID
-            isGroup: _isCurrentChatGroup,
-          );
 
           ScaffoldMessenger.of(
             context,
           ).showSnackBar(const SnackBar(content: Text('消息已撤回')));
 
           // 刷新最近联系人列表，以便更新最新消息显示
-          // 如果被撤回的消息是最后一条消息，最近联系人列表中的最新消息应该显示"此消息已被撤销"
           _loadRecentContacts();
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(response['message'] ?? '撤回失败')),
+            const SnackBar(content: Text('撤回失败')),
           );
         }
       }
@@ -6481,6 +6601,28 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     logger.debug('📍 [消息位置缓存] 已缓存 ${_messages.length} 条消息的位置 (sessionKey: $sessionKey)');
   }
 
+  /// 确保已登记群的 Agora 群会话ID（群消息收发/历史用）。优先映射，否则现取群详情补登记。
+  Future<String?> _ensureAgoraGroupId(int localGroupId) async {
+    final existing = AgoraChatService().agoraGroupIdFor(localGroupId);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final token = _token;
+    if (token == null || token.isEmpty) return null;
+    try {
+      final resp = await ApiService.getGroupDetail(
+        token: token,
+        groupId: localGroupId,
+      );
+      final gid = resp['data']?['group']?['agora_group_id'] as String?;
+      if (gid != null && gid.isNotEmpty) {
+        AgoraChatService().registerGroupMapping(localGroupId, gid);
+        return gid;
+      }
+    } catch (e) {
+      logger.error('获取群 agora_group_id 失败: $e');
+    }
+    return null;
+  }
+
   // 加载消息历史记录
   Future<void> _loadMessageHistory(
     int userId, {
@@ -6516,17 +6658,32 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         return;
       }
 
-      // 从本地数据库获取消息（增加pageSize以加载更多消息）
-      final messageService = MessageService();
-      final messages = isGroup
-          ? await messageService.getGroupMessageList(
-              groupId: userId,
-              pageSize: 20,
-            )
-          : await messageService.getMessages(
-              contactId: userId,
-              pageSize: 20,
-            );
+      // 群聊与私聊都从 Agora Chat 拉取历史（本地优先，本地空回退服务端）
+      final List<MessageModel> messages;
+      if (isGroup) {
+        final agoraGid = await _ensureAgoraGroupId(userId);
+        if (agoraGid != null && agoraGid.isNotEmpty) {
+          final chatMsgs = await AgoraChatService().loadGroupHistory(
+            agoraGroupId: agoraGid,
+            pageSize: 20,
+          );
+          messages = chatMsgs
+              .map((m) => AgoraChatService.chatMessageToModel(m))
+              .toList();
+        } else {
+          logger.error('群组未同步到 Agora（无 agora_group_id），无法加载群聊历史: $userId');
+          messages = [];
+        }
+      } else {
+        // 本地优先：先读 SDK 本地库（持久化缓存，跨重启/秒切），本地空再回退服务端
+        final chatMsgs = await AgoraChatService().loadHistory1v1(
+          peerUserId: userId,
+          pageSize: 20,
+        );
+        messages = chatMsgs
+            .map((m) => AgoraChatService.chatMessageToModel(m))
+            .toList();
+      }
       // 如果是群组，获取当前用户在群组中的角色
       if (isGroup) {
         try {
@@ -7483,19 +7640,39 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           }
         });
 
-        // 然后发送WebSocket消息
-        success = await _wsService.sendGroupMessage(
-          groupId: _currentChatUserId!,
-          content: content,
-          messageType: finalMessageType,
-          fileName: fileName,
-          quotedMessageId: quotedId,
-          quotedMessageContent: quotedContent,
-          mentionedUserIds: _mentionedUserIds.isNotEmpty
-              ? _mentionedUserIds
-              : null,
-          mentions: _mentionText.isNotEmpty ? _mentionText : null,
-        );
+        // 群聊：文本/引用/富媒体统一走 Agora Chat（替代自建 WebSocket）
+        final agoraGid = await _ensureAgoraGroupId(_currentChatUserId!);
+        if (agoraGid != null && agoraGid.isNotEmpty) {
+          final ext = <String, dynamic>{
+            AgoraChatService.extSenderName: _username,
+            AgoraChatService.extSenderAvatar: _userAvatar ?? '',
+            if (_userFullName != null && _userFullName!.isNotEmpty)
+              AgoraChatService.extSenderFullName: _userFullName,
+            AgoraChatService.extMessageType: finalMessageType,
+            if (fileName != null) AgoraChatService.extFileName: fileName,
+            if (quotedContent != null)
+              AgoraChatService.extQuotedContent: quotedContent,
+            if (_mentionedUserIds.isNotEmpty)
+              AgoraChatService.extMentionedUserIds: _mentionedUserIds,
+            if (_mentionText.isNotEmpty)
+              AgoraChatService.extMentions: _mentionText,
+          };
+          final sent = await AgoraChatService().sendGroupText(
+            agoraGroupId: agoraGid,
+            content: content,
+            ext: ext,
+          );
+          success = sent != null;
+          if (success && mounted) {
+            final idx = _messages.indexWhere((m) => m.id == messageId);
+            if (idx != -1) {
+              _messages[idx] = _messages[idx].copyWith(agoraMsgId: sent!.msgId);
+            }
+          }
+        } else {
+          logger.error('群组未同步到 Agora（无 agora_group_id），无法发送群消息');
+          success = false;
+        }
       } else {
         // 在发送之前创建临时消息（参考APP端实现）
         final messageId = tempMessageId ?? DateTime.now().millisecondsSinceEpoch;
@@ -7536,15 +7713,39 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           }
         });
         
-        // 私聊消息通过WebSocket发
-        success = await _wsService.sendMessage(
-          receiverId: _currentChatUserId!,
-          content: content,
-          messageType: finalMessageType,
-          fileName: fileName,
-          quotedMessageId: quotedId,
-          quotedMessageContent: quotedContent,
-        );
+        // 私聊：文本/引用/富媒体统一走 Agora Chat
+        ChatMessage? sent;
+        if (finalMessageType == 'text' || finalMessageType == 'quoted') {
+          sent = await AgoraChatService().sendText(
+            toUserId: _currentChatUserId!,
+            content: content,
+            ext: {
+              AgoraChatService.extSenderName: _username,
+              AgoraChatService.extSenderAvatar: _userAvatar ?? '',
+              AgoraChatService.extMessageType: finalMessageType,
+              if (quotedContent != null)
+                AgoraChatService.extQuotedContent: quotedContent,
+            },
+          );
+        } else {
+          // 图片/文件/视频/语音：content 即 OSS URL
+          sent = await AgoraChatService().sendMedia(
+            toUserId: _currentChatUserId!,
+            url: content,
+            messageType: finalMessageType,
+            senderName: _username,
+            senderAvatar: _userAvatar,
+            fileName: fileName,
+          );
+        }
+        success = sent != null;
+        // 回填 Agora 消息ID
+        if (success && mounted) {
+          final idx = _messages.indexWhere((m) => m.id == messageId);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(agoraMsgId: sent!.msgId);
+          }
+        }
       }
 
       if (success) {
@@ -8900,76 +9101,16 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       _markedAsReadContacts.add('user_$senderID');
       logger.debug('🔧 修复：已将 user_$senderID 添加到已读集合');
       
-      // 🔴 修复：发送已读回执给发送者
+      // 🔵 阶段4：发送 Agora 会话已读回执给发送者（触发对端 onMessagesRead）
       if (!_isCurrentChatGroup && _currentChatUserId == senderID) {
-        logger.debug('📖 [已读回执] 发送已读回执给发送者 $senderID');
-        _wsService.sendReadReceiptForContact(senderID);
+        logger.debug('📖 [已读回执] 发送 Agora 会话已读回执给 $senderID');
+        AgoraChatService().sendConversationReadAck(senderID.toString());
       }
       
       // 🔧 注意：不再自动刷新联系人列表，避免时序竞争问题
       // 未读数已在客户端通过 _markedAsReadContacts 机制保持为0
     } catch (e) {
       logger.debug('❌ 标记消息已读失败: $e');
-    }
-  }
-  
-  // 🔴 修复：处理已读回执
-  void _handleReadReceipt(Map<String, dynamic> data) {
-    final receiverId = data['receiver_id'] as int?;
-    if (receiverId == null) return;
-    
-    logger.debug('📖 [已读回执] 收到已读回执 - 接收者ID: $receiverId');
-    logger.debug('📖 [已读回执] 当前状态 - isGroup: $_isCurrentChatGroup, currentChatUserId: $_currentChatUserId, currentUserId: $_currentUserId');
-    logger.debug('📖 [已读回执] 消息列表数量: ${_messages.length}');
-    
-    // 如果当前是一对一聊天，且接收者ID匹配当前聊天对象
-    if (!_isCurrentChatGroup && _currentChatUserId == receiverId) {
-      logger.debug('📖 [已读回执] 条件满足，开始批量更新消息');
-      int updatedCount = 0;
-      setState(() {
-        // 批量更新所有发送给该接收者的未读消息为已读
-        for (int i = 0; i < _messages.length; i++) {
-          if (_messages[i].senderId == _currentUserId && 
-              _messages[i].receiverId == receiverId && 
-              !_messages[i].isRead) {
-            updatedCount++;
-            _messages[i] = MessageModel(
-              id: _messages[i].id,
-              serverId: _messages[i].serverId, // 🔴 关键：保留serverId，否则撤回时找不到服务器ID
-              senderId: _messages[i].senderId,
-              receiverId: _messages[i].receiverId,
-              senderName: _messages[i].senderName,
-              receiverName: _messages[i].receiverName,
-              senderAvatar: _messages[i].senderAvatar,
-              receiverAvatar: _messages[i].receiverAvatar,
-              senderNickname: _messages[i].senderNickname,
-              senderFullName: _messages[i].senderFullName,
-              receiverFullName: _messages[i].receiverFullName,
-              content: _messages[i].content,
-              messageType: _messages[i].messageType,
-              fileName: _messages[i].fileName,
-              quotedMessageId: _messages[i].quotedMessageId,
-              quotedMessageContent: _messages[i].quotedMessageContent,
-              status: _messages[i].status,
-              mentionedUserIds: _messages[i].mentionedUserIds,
-              mentions: _messages[i].mentions,
-              callType: _messages[i].callType,
-              channelName: _messages[i].channelName,
-              isRead: true,
-              createdAt: _messages[i].createdAt,
-              readAt: DateTime.now(),
-            );
-          }
-        }
-      });
-      logger.debug('✅ [已读回执] 已批量更新 $updatedCount 条消息为已读状态');
-      
-      // 🔴 修复：保存已读状态到本地数据库
-      if (updatedCount > 0) {
-        _saveReadStatusToDatabase(receiverId);
-      }
-    } else {
-      logger.debug('⚠️ [已读回执] 条件不满足，未更新消息 - isGroup: $_isCurrentChatGroup, currentChatUserId: $_currentChatUserId, receiverId: $receiverId');
     }
   }
   
@@ -10132,6 +10273,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
 
         final groupDetail = GroupModel.fromJson(groupData);
+
+        // 登记 本地群ID ↔ Agora 群会话ID 映射（群消息收发/历史以此为准）
+        AgoraChatService()
+            .registerGroupMapping(groupDetail.id, groupDetail.agoraGroupId);
 
         // 更新 _groups 列表中的对应群组
         setState(() {
@@ -11609,45 +11754,6 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
   }
 
-  // 🔴 处理消息类型更新通知（通话结束后将按钮消息转换为普通系统消息）
-  Future<void> _handleUpdateMessageType(dynamic data) async {
-    if (data == null) return;
-    if (!mounted) return;
-
-    final messageId = data['message_id'] as int?;
-    final groupId = data['group_id'] as int?;
-    final newMessageType = data['new_message_type'] as String?;
-
-    logger.debug('🔄 [PC] 收到消息类型更新通知 - messageId: $messageId, groupId: $groupId, newType: $newMessageType');
-
-    if (messageId == null || newMessageType == null) {
-      logger.debug('🔄 [PC] 数据不完整，跳过处理');
-      return;
-    }
-
-    // 更新本地数据库中的消息类型
-    try {
-      final localDb = LocalDatabaseService();
-      if (groupId != null) {
-        await localDb.updateGroupMessageType(messageId, newMessageType);
-        logger.debug('🔄 [PC] 已更新数据库中的群组消息类型');
-      }
-    } catch (e) {
-      logger.error('🔄 [PC] 更新数据库消息类型失败: $e');
-    }
-
-    // 更新内存中的消息列表
-    setState(() {
-      for (int i = 0; i < _messages.length; i++) {
-        if (_messages[i].id == messageId || _messages[i].serverId == messageId) {
-          _messages[i] = _messages[i].copyWith(messageType: newMessageType);
-          logger.debug('🔄 [PC] 已更新消息列表中的消息类型: ${_messages[i].messageType}');
-          break;
-        }
-      }
-    });
-  }
-
   // 🔴 显示定时发送弹窗
   void _showScheduledMessageDialog(RecentContactModel contact) {
     final token = _token;
@@ -12524,7 +12630,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         context,
         MaterialPageRoute(
           builder: (context) => CreateGroupDialog(
-            contacts: _contacts,
+            contacts: _contacts.where((c) => c.isApproved && !c.isDeleted).toList(),
             currentUserId: _currentUserId,
             currentUserName: _userDisplayName,
             currentUserAvatar: _userAvatar ?? '',
@@ -12617,7 +12723,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         context,
         MaterialPageRoute(
           builder: (context) => CreateGroupDialog(
-            contacts: _contacts,
+            contacts: _contacts.where((c) => c.isApproved && !c.isDeleted).toList(),
             currentUserId: _currentUserId,
             currentUserName: _userDisplayName,
             currentUserAvatar: _userAvatar ?? '',
@@ -12960,8 +13066,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         // 支持格式：
         // 1. user-{userId}-{username} - 用户ID和用户名
         // 2. group-{groupId} - 群组ID
-        // 3. youdu://user/{username} - 用户名
-        // 4. youdu://group/{groupId} - 群组ID
+        // 3. telegram://user/{username} - 用户名
+        // 4. telegram://group/{groupId} - 群组ID
         if (result.startsWith('user-')) {
           // 用户ID格式: user-{userId}-{username}
           final parts = result.substring('user-'.length).split('-');
@@ -12975,11 +13081,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             final userId = parts[0];
             _handleAddContactByUserId(userId);
           }
-        } else if (result.startsWith('youdu://user/')) {
-          final username = result.substring('youdu://user/'.length);
+        } else if (result.startsWith('telegram://user/')) {
+          final username = result.substring('telegram://user/'.length);
           _handleAddContactByUsername(username);
-        } else if (result.startsWith('youdu://group/')) {
-          final groupId = result.substring('youdu://group/'.length);
+        } else if (result.startsWith('telegram://group/')) {
+          final groupId = result.substring('telegram://group/'.length);
           _handleJoinGroupById(groupId);
         } else {
           // 如果不是特定格式，显示原始内容
@@ -13212,7 +13318,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
                 logger.debug('✅ [对话框添加联系人] API调用成功，准备处理响应');
                 if (mounted) {
-                  _handleAddContactResponse(response, context);
+                  // 对话框已被 pop，builder 的 context 已销毁，必须用 State 的 context
+                  _handleAddContactResponse(response, this.context);
                 }
               } catch (e, stackTrace) {
                 logger.debug('❌ [对话框添加联系人] 失败');
@@ -13311,25 +13418,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     // 更新 _previousInputText
     _previousInputText = newText;
 
-    // 处理"正在输入"消息（仅在一对一私聊时）
+    // 阶段4：通过 Agora Chat 命令消息发送"正在输入"（节流：3 秒内最多一次）
     if (!_isCurrentChatGroup && _currentChatUserId != null) {
-      // 取消之前的定时器
-      _typingTimer?.cancel();
-
-      if (newText.trim().isNotEmpty) {
-        // 输入框不为空，发送"正在输入"消息（防抖：延迟500ms发送）
-        _typingTimer = Timer(const Duration(milliseconds: 500), () {
-          _wsService.sendTypingIndicator(
-            receiverId: _currentChatUserId!,
-            isTyping: true,
-          );
-        });
-      } else {
-        // 输入框为空，发送"停止输入"消息（立即发送，不需要防抖）
-        _wsService.sendTypingIndicator(
-          receiverId: _currentChatUserId!,
-          isTyping: false,
-        );
+      if (newText.trim().isNotEmpty && !(_typingTimer?.isActive ?? false)) {
+        AgoraChatService().sendTyping(toUserId: _currentChatUserId!);
+        _typingTimer = Timer(const Duration(seconds: 3), () {});
       }
     }
   }
@@ -14368,12 +14461,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
               }
             }
 
-            // 如果通话被拒绝，发送通话拒绝消息（发起方收到拒绝通知，显示"对方已拒绝"）
+            // 🔴 通话被拒绝：拒绝消息统一由拒绝方发送，发起方不再发送
             if (result is Map && result['callRejected'] == true) {
-              await _sendCallRejectedMessage(
-                _currentCallUserId ?? 0,
-                isRejecter: false,
-              );
+              logger.debug('📞 [PC] 通话被拒绝（拒绝消息由拒绝方发送，此处不发送）');
             }
             // 如果通话被取消，发送通话取消消息（发起方取消，显示"已取消"）
             else if (result is Map && result['callCancelled'] == true) {
@@ -15831,32 +15921,25 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
   }
 
+  // 空聊天状态（未选择会话时显示背景图，文字已包含在图片中）
+  Widget _buildEmptyChatWindow() {
+    return Expanded(
+      child: Container(
+        decoration: const BoxDecoration(
+          image: DecorationImage(
+            image: AssetImage('assets/images/chat_pc_bg.png'),
+            fit: BoxFit.cover,
+          ),
+        ),
+      ),
+    );
+  }
+
   // 右侧聊天窗口
   Widget _buildChatWindow() {
     // 如果没有选中聊天用户，显示空状
     if (_currentChatUserId == null) {
-      return Expanded(
-        child: Container(
-          color: const Color(0xFFF5F5F5),
-          child: const Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.message_outlined,
-                  size: 64,
-                  color: Color(0xFFCCCCCC),
-                ),
-                SizedBox(height: 16),
-                Text(
-                  '选择一个会话开始聊天',
-                  style: TextStyle(fontSize: 14, color: Color(0xFF999999)),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
+      return _buildEmptyChatWindow();
     }
 
     // 获取当前聊天的联系人信息（可能来自搜索结果或最近联系人
@@ -15901,28 +15984,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
     // 如果找不到联系人信息，显示空状态
     if (contact == null) {
-      return Expanded(
-        child: Container(
-          color: const Color(0xFFF5F5F5),
-          child: const Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.message_outlined,
-                  size: 64,
-                  color: Color(0xFFCCCCCC),
-                ),
-                SizedBox(height: 16),
-                Text(
-                  '选择一个会话开始聊天',
-                  style: TextStyle(fontSize: 14, color: Color(0xFF999999)),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
+      return _buildEmptyChatWindow();
     }
 
     return Expanded(
@@ -17083,7 +17145,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                         ),
                                         const SizedBox(width: 6),
                                         Text(
-                                          message.content,
+                                          // 🔴 根据 isSelf 显示：拒绝方（发送者）看"已拒绝"，发起方看"对方已拒绝"
+                                          isSelf ? '已拒绝' : '对方已拒绝',
                                           style: const TextStyle(
                                             fontSize: 14,
                                             color: Color(0xFF333333),
@@ -17103,7 +17166,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                                         ),
                                         const SizedBox(width: 6),
                                         Text(
-                                          message.content,
+                                          // 🔴 根据 isSelf 显示：拒绝方（发送者）看"已拒绝"，发起方看"对方已拒绝"
+                                          isSelf ? '已拒绝' : '对方已拒绝',
                                           style: const TextStyle(
                                             fontSize: 14,
                                             color: Color(0xFF333333),
@@ -19195,7 +19259,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          SvgPicture.asset('assets/通讯未选择内容.svg', width: 360, height: 208),
+          SvgPicture.asset('assets/通讯录/未选择内容.svg', width: 360, height: 208),
           const SizedBox(height: 24),
           const Text(
             '选择一个联系人或群组开始交流',
@@ -19271,7 +19335,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
               // 显示待审核联系人数量
               if (!_isLoadingContacts && _contactsError == null)
                 Text(
-                  '${_contacts.where((c) => c.isPendingForUser(_currentUserId)).length}人',
+                  '${_contacts.where((c) => c.isPendingForUser(_currentUserId) || c.isWaitingForApproval(_currentUserId)).length}人',
                   style: const TextStyle(
                     fontSize: 14,
                     color: Color(0xFF999999),
@@ -19368,8 +19432,12 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       );
     }
 
-    // 过滤出当前用户需要审核的联系人
-    var pendingContacts = _contacts.where((c) => c.isPendingForUser(_currentUserId)).toList();
+    // 过滤出待处理的联系人：别人发给我待我审核的 + 我发出等待对方审核的
+    var pendingContacts = _contacts
+        .where((c) =>
+            c.isPendingForUser(_currentUserId) ||
+            c.isWaitingForApproval(_currentUserId))
+        .toList();
 
     // 按名称首字母排序
     pendingContacts = SortHelper.sortContactsByName(
@@ -20336,7 +20404,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          SvgPicture.asset('assets/通讯未选择内容.svg', width: 360, height: 208),
+          SvgPicture.asset('assets/通讯录/未选择内容.svg', width: 360, height: 208),
           const SizedBox(height: 24),
           const Text(
             '选择一个联系人查看详情',
@@ -23159,11 +23227,23 @@ class _VideoViewerDialogState extends State<_VideoViewerDialog> {
   }
 
   Future<void> _initializeMobileVideoPlayer() async {
-    // 创建VideoPlayerController（参考 example 实现）
-    _videoPlayerController = VideoPlayerController.networkUrl(
-      Uri.parse(widget.videoUrl),
-      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
-    );
+    // 📦 优先本地缓存：命中则零流量秒开；
+    // 未命中保持 networkUrl 流式秒开，同时后台分片下载落盘，下次播放即命中。
+    final cachedVideo = await MediaCacheService().lookup(widget.videoUrl);
+    if (cachedVideo != null) {
+      logger.debug('📦 [视频] 命中本地缓存: ${cachedVideo.path}');
+      _videoPlayerController = VideoPlayerController.file(
+        cachedVideo,
+        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+      );
+    } else {
+      _videoPlayerController = VideoPlayerController.networkUrl(
+        Uri.parse(widget.videoUrl),
+        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+      );
+      // 后台预取完整文件（串行队列，不抢首播带宽）
+      MediaCacheService().prefetchVideo(widget.videoUrl);
+    }
 
     // 初始化视频播放器
     await _videoPlayerController!.initialize();

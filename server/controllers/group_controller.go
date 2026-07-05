@@ -3,17 +3,15 @@ package controllers
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/services"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/services"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 
 	"github.com/gin-gonic/gin"
 )
@@ -108,21 +106,83 @@ func (gc *GroupController) CreateGroup(c *gin.Context) {
 		}
 	}
 
-	// 创建系统消息：群组已创建，并推送给所有成员（包括群主）
-	go gc.sendGroupCreatedNotification(group.ID, user.ID, user.Username)
-
-	// 同步群组到腾讯云 IM（异步执行，不影响创建流程）
-	go func() {
-		// 收集所有成员ID（包括群主）
-		allMemberIDs := append([]int{user.ID}, req.MemberIDs...)
-		if err := services.TencentIM.CreateGroup(group.ID, req.Name, user.ID, allMemberIDs); err != nil {
-			utils.LogDebug("⚠️ 同步群组到腾讯云 IM 失败: %v", err)
+	// 同步群组到 Agora Chat（同步执行，把分配的群ID回写并返回给客户端，承载群聊会话）
+	allMemberIDs := append([]int{user.ID}, req.MemberIDs...)
+	if services.AgoraChatGroup != nil {
+		if agoraGroupID, err := services.AgoraChatGroup.CreateGroup(req.Name, user.ID, allMemberIDs); err != nil {
+			utils.LogDebug("⚠️ 同步群组到 Agora Chat 失败: %v", err)
+		} else if agoraGroupID != "" {
+			if err := gc.groupRepo.SetAgoraGroupID(group.ID, agoraGroupID); err != nil {
+				utils.LogDebug("⚠️ 回写 agora_group_id 失败: %v", err)
+			} else {
+				group.AgoraGroupID = &agoraGroupID
+				// 🔵 给 Agora 群发一条系统消息，使该群会话「非空」。
+				// 客户端 Agora ChatOptions loadEmptyConversations=false：空会话不会出现在 loadAllConversations，
+				// 会话列表(buildConversationSummaries)就无法展示新群。发一条消息后，群会话对所有成员都可见。
+				createdContent := "群组\"" + req.Name + "\"创建成功"
+				ext := map[string]interface{}{
+					"message_type": "system",
+					"sender_name":  user.Username,
+				}
+				if err := services.AgoraChatGroup.SendGroupText(user.ID, agoraGroupID, createdContent, ext); err != nil {
+					utils.LogDebug("⚠️ 发送群创建系统消息(Agora)失败: %v", err)
+				}
+			}
 		}
-	}()
+	}
+
+	// 创建系统消息：群组已创建，并推送给所有成员（包括群主）。
+	// 放在 Agora 建群之后：确保客户端收到该 WS 通知去刷新会话列表时，agora_group_id 已回写、群会话已非空。
+	go gc.sendGroupCreatedNotification(group.ID, user.ID, user.Username)
 
 	utils.Success(c, gin.H{
 		"group": group,
 	})
+}
+
+// syncAgoraAddMembers 异步把成员同步加入 Agora Chat 群（agoraGroupID 为空则跳过）
+func (gc *GroupController) syncAgoraAddMembers(agoraGroupID *string, memberIDs []int) {
+	if services.AgoraChatGroup == nil || agoraGroupID == nil || *agoraGroupID == "" || len(memberIDs) == 0 {
+		return
+	}
+	gid := *agoraGroupID
+	ids := append([]int(nil), memberIDs...)
+	go func() {
+		if err := services.AgoraChatGroup.AddGroupMembers(gid, ids); err != nil {
+			utils.LogDebug("⚠️ 同步加入 Agora Chat 群成员失败: %v", err)
+		}
+	}()
+}
+
+// syncAgoraRemoveMember 异步把成员从 Agora Chat 群移除（agoraGroupID 为空则跳过）
+func (gc *GroupController) syncAgoraRemoveMember(agoraGroupID *string, userID int) {
+	if services.AgoraChatGroup == nil || agoraGroupID == nil || *agoraGroupID == "" {
+		return
+	}
+	gid := *agoraGroupID
+	go func() {
+		if err := services.AgoraChatGroup.RemoveGroupMember(gid, userID); err != nil {
+			utils.LogDebug("⚠️ 同步移除 Agora Chat 群成员失败: %v", err)
+		}
+	}()
+}
+
+// buildSystemGroupMessage 构造一条内存中的群系统消息（阶段6：群消息已迁移到 Agora Chat，
+// 群系统通知不再写 group_messages 表，仅用于实时 WS 广播；不持久化，刷新后历史从 Agora 读取）。
+func (gc *GroupController) buildSystemGroupMessage(req *models.CreateGroupMessageRequest, senderID int, senderName string) (*models.GroupMessage, error) {
+	mt := req.MessageType
+	if mt == "" {
+		mt = "system"
+	}
+	return &models.GroupMessage{
+		GroupID:     req.GroupID,
+		SenderID:    senderID,
+		SenderName:  senderName,
+		Content:     req.Content,
+		MessageType: mt,
+		Status:      "sent",
+		CreatedAt:   time.Now().UTC(),
+	}, nil
 }
 
 // GetGroup 获取群组详情
@@ -358,6 +418,7 @@ func (gc *GroupController) UpdateGroup(c *gin.Context) {
 		}
 
 		// 已经在前面验证过用户是群组成员，所以这里不需要额外的权限检查
+		var directlyAdded []int // 直接通过（非待审核）的成员，需同步到 Agora Chat 群
 		for _, memberID := range req.AddMembers {
 			// 如果开启了邀请确认且当前用户是普通成员，则添加为待审核状态
 			if group.InviteConfirmation && role == "member" {
@@ -370,6 +431,7 @@ func (gc *GroupController) UpdateGroup(c *gin.Context) {
 				// 群主和管理员添加的成员直接通过
 				err = gc.groupRepo.AddGroupMember(groupID, memberID, nil, nil, "member")
 				if err == nil {
+					directlyAdded = append(directlyAdded, memberID)
 					// 向新添加的成员发送系统消息：您已被添加到群组
 					go gc.sendMemberAddedNotification(groupID, memberID, operatorName)
 				}
@@ -378,6 +440,8 @@ func (gc *GroupController) UpdateGroup(c *gin.Context) {
 				utils.LogDebug("添加群组成员失败 (user_id=%d): %v", memberID, err)
 			}
 		}
+		// 同步直接通过的成员到 Agora Chat 群
+		gc.syncAgoraAddMembers(group.AgoraGroupID, directlyAdded)
 	}
 
 	// 移除群组成员（群主和管理员可操作，但管理员不能移除群主和其他管理员）
@@ -386,6 +450,9 @@ func (gc *GroupController) UpdateGroup(c *gin.Context) {
 			utils.Error(c, http.StatusForbidden, "只有群主和管理员可以移除成员")
 			return
 		}
+
+		// 读取 Agora 群ID，用于同步移除
+		removeAgoraGroupID, _ := gc.groupRepo.GetAgoraGroupID(groupID)
 
 		// 获取操作者信息（用于系统消息的发送者）
 		operator, err := gc.userRepo.FindByID(userID.(int))
@@ -426,6 +493,10 @@ func (gc *GroupController) UpdateGroup(c *gin.Context) {
 				utils.LogDebug("移除群组成员失败 (user_id=%d): %v", memberID, err)
 			} else {
 				utils.LogDebug("✅ 群组成员已移除 (user_id=%d)", memberID)
+				// 同步从 Agora Chat 群移除
+				if removeAgoraGroupID != "" {
+					gc.syncAgoraRemoveMember(&removeAgoraGroupID, memberID)
+				}
 			}
 		}
 	}
@@ -465,371 +536,9 @@ func (gc *GroupController) GetUserGroups(c *gin.Context) {
 	})
 }
 
-// CreateGroupMessage 创建群组消息
-func (gc *GroupController) CreateGroupMessage(c *gin.Context) {
-	// 获取当前用户ID
-	userID, exists := c.Get("user_id")
-	if !exists {
-		utils.Error(c, http.StatusUnauthorized, "未授权")
-		return
-	}
-
-	var req models.CreateGroupMessageRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.Error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
-		return
-	}
-
-	// 首先检查群组是否已解散
-	disbandedManager := models.GetDisbandedGroupsManager()
-	if disbandedManager.IsGroupDisbanded(req.GroupID) {
-		utils.LogDebug("群组 %d 已被群主解散，拒绝发送消息", req.GroupID)
-		utils.Error(c, http.StatusNotFound, "该群组已被群主解散")
-		return
-	}
-
-	// 验证用户是否是群组成员并获取角色
-	userRole, err := gc.groupRepo.GetUserGroupRole(req.GroupID, userID.(int))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			utils.Error(c, http.StatusForbidden, "您不是该群组成员")
-			return
-		}
-		utils.Error(c, http.StatusInternalServerError, "验证群组成员失败")
-		return
-	}
-
-	// 获取群组信息，检查是否开启全体禁言
-	group, err := gc.groupRepo.GetGroupByID(req.GroupID)
-	if err != nil {
-		utils.LogDebug("获取群组信息失败: %v", err)
-		utils.Error(c, http.StatusInternalServerError, "获取群组信息失败")
-		return
-	}
-
-	// 如果开启了全体禁言，只有群主和管理员可以发送消息
-	if group.AllMuted && userRole != "owner" && userRole != "admin" {
-		utils.Error(c, http.StatusForbidden, "群组已开启全体禁言，只有群主和管理员可以发送消息")
-		return
-	}
-
-	// 检查用户是否被单独禁言
-	isMuted, err := gc.groupRepo.IsGroupMemberMuted(req.GroupID, userID.(int))
-	if err != nil {
-		utils.LogDebug("检查禁言状态失败: %v", err)
-		utils.Error(c, http.StatusInternalServerError, "检查禁言状态失败")
-		return
-	}
-
-	if isMuted {
-		utils.Error(c, http.StatusForbidden, "你已被群主禁言")
-		return
-	}
-
-	// 获取发送者信息
-	user, err := gc.userRepo.FindByID(userID.(int))
-	if err != nil {
-		utils.Error(c, http.StatusInternalServerError, "获取用户信息失败")
-		return
-	}
-
-	senderName := user.Username
-	if user.FullName != nil && *user.FullName != "" {
-		senderName = *user.FullName
-	}
-
-	// 创建群组消息（HTTP API，没有群昵称信息）
-	var avatar *string
-	if user.Avatar != "" {
-		avatar = &user.Avatar
-	}
-	message, err := gc.groupRepo.CreateGroupMessage(&req, user.ID, senderName, nil, user.FullName, avatar)
-	if err != nil {
-		utils.LogDebug("创建群组消息失败: %v", err)
-		utils.Error(c, http.StatusInternalServerError, "发送消息失败")
-		return
-	}
-
-	// 通过WebSocket发送消息给群组所有成员
-	go gc.broadcastGroupMessage(message)
-
-	utils.Success(c, gin.H{
-		"message": message,
-	})
-}
-
-// GetGroupMessages 获取群组消息列表
-func (gc *GroupController) GetGroupMessages(c *gin.Context) {
-	// 获取当前用户ID
-	userID, exists := c.Get("user_id")
-	if !exists {
-		utils.Error(c, http.StatusUnauthorized, "未授权")
-		return
-	}
-
-	// 获取群组ID
-	groupIDStr := c.Param("id")
-	groupID, err := strconv.Atoi(groupIDStr)
-	if err != nil {
-		utils.Error(c, http.StatusBadRequest, "无效的群组ID")
-		return
-	}
-
-	// 验证用户是否是群组成员
-	_, err = gc.groupRepo.GetUserGroupRole(groupID, userID.(int))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			utils.Error(c, http.StatusForbidden, "您不是该群组成员")
-			return
-		}
-		utils.Error(c, http.StatusInternalServerError, "验证群组成员失败")
-		return
-	}
-
-	// 获取limit参数（默认100条）
-	limit := 100
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
-		}
-	}
-
-	// 获取群组消息，并过滤掉当前用户已删除的消息
-	currentUserID := userID.(int)
-	userIDStr := strconv.Itoa(currentUserID)
-
-	// 直接从数据库查询并过滤
-	query := `
-		SELECT 
-			gm.id, 
-			gm.group_id, 
-			gm.sender_id, 
-			gm.sender_name,
-			gm.sender_avatar,
-			gmem.nickname as sender_nickname,
-			gm.content, 
-			gm.message_type, 
-			gm.file_name, 
-			gm.quoted_message_id, 
-			gm.quoted_message_content,
-			gm.mentioned_user_ids,
-			gm.mentions,
-			gm.call_type,
-			gm.channel_name,
-			gm.status, 
-			gm.created_at
-		FROM group_messages gm
-		LEFT JOIN group_members gmem ON gmem.group_id = gm.group_id AND gmem.user_id = gm.sender_id
-		WHERE gm.group_id = $1
-			AND (gm.deleted_by_users = '' OR gm.deleted_by_users NOT LIKE '%' || $3 || '%')
-		ORDER BY gm.created_at DESC
-		LIMIT $2
-	`
-
-	rows, err := gc.groupRepo.DB.Query(query, groupID, limit, userIDStr)
-	if err != nil {
-		utils.LogDebug("获取群组消息失败: %v", err)
-		utils.Error(c, http.StatusInternalServerError, "获取消息失败")
-		return
-	}
-	defer rows.Close()
-
-	var messages []models.GroupMessage
-	for rows.Next() {
-		var msg models.GroupMessage
-		err := rows.Scan(
-			&msg.ID,
-			&msg.GroupID,
-			&msg.SenderID,
-			&msg.SenderName,
-			&msg.SenderAvatar,
-			&msg.SenderNickname,
-			&msg.Content,
-			&msg.MessageType,
-			&msg.FileName,
-			&msg.QuotedMessageID,
-			&msg.QuotedMessageContent,
-			&msg.MentionedUserIDs,
-			&msg.Mentions,
-			&msg.CallType,
-			&msg.ChannelName,
-			&msg.Status,
-			&msg.CreatedAt,
-		)
-		if err != nil {
-			utils.LogDebug("扫描群组消息失败: %v", err)
-			continue
-		}
-		messages = append(messages, msg)
-	}
-
-	// 反转消息顺序（从旧到新）
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-
-	if messages == nil {
-		messages = []models.GroupMessage{}
-	}
-
-	utils.Success(c, gin.H{
-		"messages": messages,
-	})
-}
-
 // GetGroupMessagesByIdsRequest 根据消息ID列表获取群组消息的请求
 type GetGroupMessagesByIdsRequest struct {
 	MessageIDs []int `json:"message_ids" binding:"required"`
-}
-
-// GetGroupMessagesByIds 根据消息ID列表获取群组消息
-// 用于客户端主动拉取缺失的消息
-func (gc *GroupController) GetGroupMessagesByIds(c *gin.Context) {
-	// 获取当前用户ID
-	userID, exists := c.Get("user_id")
-	if !exists {
-		utils.Error(c, http.StatusUnauthorized, "未授权")
-		return
-	}
-
-	// 获取群组ID
-	groupIDStr := c.Param("id")
-	groupID, err := strconv.Atoi(groupIDStr)
-	if err != nil {
-		utils.Error(c, http.StatusBadRequest, "无效的群组ID")
-		return
-	}
-
-	var req GetGroupMessagesByIdsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.Error(c, http.StatusBadRequest, "无效的请求参数")
-		return
-	}
-
-	if len(req.MessageIDs) == 0 {
-		utils.Error(c, http.StatusBadRequest, "消息ID列表不能为空")
-		return
-	}
-
-	// 限制一次最多获取100条消息
-	if len(req.MessageIDs) > 100 {
-		utils.Error(c, http.StatusBadRequest, "一次最多只能获取100条消息")
-		return
-	}
-
-	// 验证用户是否是群组成员
-	_, err = gc.groupRepo.GetUserGroupRole(groupID, userID.(int))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			utils.Error(c, http.StatusForbidden, "您不是该群组成员")
-			return
-		}
-		utils.Error(c, http.StatusInternalServerError, "验证群组成员失败")
-		return
-	}
-
-	currentUserID := userID.(int)
-	userIDStr := strconv.Itoa(currentUserID)
-
-	utils.LogDebug("📜 根据消息ID列表获取群组消息: 群组ID=%d, 用户=%v, 消息数量=%d", groupID, currentUserID, len(req.MessageIDs))
-
-	// 构建IN查询的占位符
-	placeholders := make([]string, len(req.MessageIDs))
-	args := make([]interface{}, len(req.MessageIDs)+1)
-	for i, id := range req.MessageIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-	args[len(req.MessageIDs)] = groupID
-
-	// 🔴 最可靠的方法：先查询所有消息（不包含deleted_by_users过滤），然后在应用层过滤
-	query := fmt.Sprintf(`
-		SELECT 
-			gm.id, 
-			gm.group_id, 
-			gm.sender_id, 
-			gm.sender_name,
-			gm.sender_avatar,
-			gmem.nickname as sender_nickname,
-			gm.content, 
-			gm.message_type, 
-			gm.file_name, 
-			gm.quoted_message_id, 
-			gm.quoted_message_content,
-			gm.mentioned_user_ids,
-			gm.mentions,
-			gm.call_type,
-			gm.channel_name,
-			gm.status,
-			gm.deleted_by_users,
-			gm.created_at
-		FROM group_messages gm
-		LEFT JOIN group_members gmem ON gmem.group_id = gm.group_id AND gmem.user_id = gm.sender_id
-		WHERE gm.id IN (%s)
-			AND gm.group_id = $%d
-		ORDER BY gm.created_at ASC
-	`, strings.Join(placeholders, ","), len(req.MessageIDs)+1)
-
-	rows, err := gc.groupRepo.DB.Query(query, args...)
-	if err != nil {
-		utils.LogDebug("❌ 查询群组消息失败: %v", err)
-		utils.Error(c, http.StatusInternalServerError, "获取消息失败")
-		return
-	}
-	defer rows.Close()
-
-	var allMessages []models.GroupMessage
-	for rows.Next() {
-		var msg models.GroupMessage
-		var deletedByUsers string
-		err := rows.Scan(
-			&msg.ID,
-			&msg.GroupID,
-			&msg.SenderID,
-			&msg.SenderName,
-			&msg.SenderAvatar,
-			&msg.SenderNickname,
-			&msg.Content,
-			&msg.MessageType,
-			&msg.FileName,
-			&msg.QuotedMessageID,
-			&msg.QuotedMessageContent,
-			&msg.MentionedUserIDs,
-			&msg.Mentions,
-			&msg.CallType,
-			&msg.ChannelName,
-			&msg.Status,
-			&deletedByUsers,
-			&msg.CreatedAt,
-		)
-		if err != nil {
-			utils.LogDebug("❌ 扫描群组消息失败: %v", err)
-			continue
-		}
-		msg.DeletedByUsers = deletedByUsers
-		allMessages = append(allMessages, msg)
-	}
-
-	// 🔴 在应用层过滤掉当前用户已删除的消息
-	var messages []models.GroupMessage
-	for _, msg := range allMessages {
-		// 如果deleted_by_users为空，或者不包含当前用户ID，则保留该消息
-		if msg.DeletedByUsers == "" || !strings.Contains(msg.DeletedByUsers, userIDStr) {
-			messages = append(messages, msg)
-		}
-	}
-
-	utils.LogDebug("✅ 成功获取 %d 条群组消息（请求 %d 条）", len(messages), len(req.MessageIDs))
-
-	if messages == nil {
-		messages = []models.GroupMessage{}
-	}
-
-	utils.Success(c, gin.H{
-		"messages":  messages,
-		"total":     len(messages),
-		"requested": len(req.MessageIDs),
-	})
 }
 
 // broadcastGroupMessage 广播群组消息给所有成员
@@ -910,7 +619,7 @@ func (gc *GroupController) sendGroupCreatedNotification(groupID int, ownerID int
 		MessageType: "system",
 	}
 
-	ownerMessage, err := gc.groupRepo.CreateGroupMessage(ownerMsg, ownerID, senderName, nil, nil, nil)
+	ownerMessage, err := gc.buildSystemGroupMessage(ownerMsg, ownerID, senderName)
 	if err != nil {
 		utils.LogDebug("创建群主通知消息失败: %v", err)
 	} else {
@@ -949,7 +658,7 @@ func (gc *GroupController) sendGroupCreatedNotification(groupID int, ownerID int
 		MessageType: "system",
 	}
 
-	message, err := gc.groupRepo.CreateGroupMessage(createMsg, ownerID, senderName, nil, nil, nil)
+	message, err := gc.buildSystemGroupMessage(createMsg, ownerID, senderName)
 	if err != nil {
 		utils.LogDebug("创建群组邀请通知消息失败: %v", err)
 	} else {
@@ -1287,6 +996,16 @@ func (gc *GroupController) DeleteGroup(c *gin.Context) {
 
 	utils.LogDebug("✅ 群组删除成功: 群组ID=%d, 群组名称=%s", groupID, group.Name)
 
+	// 同步解散 Agora Chat 群（异步，不阻塞响应）
+	if services.AgoraChatGroup != nil && group.AgoraGroupID != nil && *group.AgoraGroupID != "" {
+		agoraGroupID := *group.AgoraGroupID
+		go func() {
+			if err := services.AgoraChatGroup.DestroyGroup(agoraGroupID); err != nil {
+				utils.LogDebug("⚠️ 同步解散 Agora Chat 群失败: %v", err)
+			}
+		}()
+	}
+
 	// 将群组ID添加到已解散群组管理器
 	disbandedManager := models.GetDisbandedGroupsManager()
 	disbandedManager.AddDisbandedGroup(groupID)
@@ -1384,6 +1103,9 @@ func (gc *GroupController) JoinGroup(c *gin.Context) {
 
 	utils.LogDebug("✅ 用户加入群组成功: 群组ID=%d, 用户ID=%v", groupID, currentUserID)
 
+	// 同步加入 Agora Chat 群
+	gc.syncAgoraAddMembers(group.AgoraGroupID, []int{currentUserID.(int)})
+
 	// 向新成员发送系统消息：您已加入群组
 	go gc.sendMemberJoinedNotification(groupID, currentUserID.(int), userName)
 
@@ -1411,7 +1133,7 @@ func (gc *GroupController) LeaveGroup(c *gin.Context) {
 	utils.LogDebug("🚪 退出群组请求: 群组ID=%d, 用户ID=%v", groupID, currentUserID)
 
 	// 验证群组是否存在
-	_, err = gc.groupRepo.GetGroupByID(groupID)
+	group, err := gc.groupRepo.GetGroupByID(groupID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			utils.Error(c, http.StatusNotFound, "群组不存在")
@@ -1448,6 +1170,9 @@ func (gc *GroupController) LeaveGroup(c *gin.Context) {
 	}
 
 	utils.LogDebug("✅ 用户退出群组成功: 群组ID=%d, 用户ID=%v", groupID, currentUserID)
+
+	// 同步从 Agora Chat 群移除
+	gc.syncAgoraRemoveMember(group.AgoraGroupID, currentUserID.(int))
 
 	// 通知其他群成员用户已退出（可选，如果需要实时通知的话）
 	// 这里可以通过 WebSocket 发送通知
@@ -1917,6 +1642,11 @@ func (gc *GroupController) ApproveGroupMember(c *gin.Context) {
 		return
 	}
 
+	// 审核通过后同步加入 Agora Chat 群
+	if agoraGroupID, e := gc.groupRepo.GetAgoraGroupID(groupID); e == nil && agoraGroupID != "" {
+		gc.syncAgoraAddMembers(&agoraGroupID, []int{req.UserID})
+	}
+
 	utils.Success(c, gin.H{
 		"message": "审核通过",
 	})
@@ -2007,7 +1737,7 @@ func (gc *GroupController) sendMemberAddedNotification(groupID int, memberID int
 	}
 
 	// 创建群组消息（使用成员ID作为发送者，避免外键约束错误）
-	message, err := gc.groupRepo.CreateGroupMessage(createMsg, memberID, senderName, nil, nil, nil)
+	message, err := gc.buildSystemGroupMessage(createMsg, memberID, senderName)
 	if err != nil {
 		utils.LogDebug("创建成员添加通知消息失败: %v", err)
 		return
@@ -2124,7 +1854,7 @@ func (gc *GroupController) sendMemberRemovedNotification(groupID int, memberID i
 	}
 
 	// 创建群组消息（使用操作者ID作为sender_id）
-	message, err := gc.groupRepo.CreateGroupMessage(createMsg, operatorID, senderName, nil, nil, nil)
+	message, err := gc.buildSystemGroupMessage(createMsg, operatorID, senderName)
 	if err != nil {
 		utils.LogDebug("创建成员移除通知消息失败: %v", err)
 		return
@@ -2174,7 +1904,7 @@ func (gc *GroupController) sendAllMutedNotificationToGroup(groupID int, operator
 	}
 
 	// 创建群组消息
-	message, err := gc.groupRepo.CreateGroupMessage(createMsg, operatorID, senderName, nil, nil, nil)
+	message, err := gc.buildSystemGroupMessage(createMsg, operatorID, senderName)
 	if err != nil {
 		utils.LogDebug("创建全体禁言通知消息失败: %v", err)
 		return
@@ -2236,7 +1966,7 @@ func (gc *GroupController) sendMuteNotificationToUser(groupID int, targetUserID 
 	}
 
 	// 创建群组消息
-	message, err := gc.groupRepo.CreateGroupMessage(createMsg, operatorID, operatorName, nil, nil, nil)
+	message, err := gc.buildSystemGroupMessage(createMsg, operatorID, operatorName)
 	if err != nil {
 		utils.LogDebug("创建个人禁言通知消息失败: %v", err)
 		return
@@ -2296,7 +2026,7 @@ func (gc *GroupController) sendMemberJoinedNotification(groupID int, memberID in
 	// 使用加入者的ID作为发送者（避免外键约束错误）
 	senderName := "系统"
 
-	message, err := gc.groupRepo.CreateGroupMessage(createMsg, memberID, senderName, nil, nil, nil)
+	message, err := gc.buildSystemGroupMessage(createMsg, memberID, senderName)
 	if err != nil {
 		utils.LogDebug("创建成员加入通知消息失败: %v", err)
 		return

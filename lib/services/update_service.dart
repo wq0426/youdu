@@ -486,17 +486,17 @@ class UpdateService {
     // 如果无法从URL提取，使用默认文件名
     logger.debug('📦 [文件名] 使用默认文件名');
     if (Platform.isWindows) {
-      return 'youdu_update.exe';
+      return 'telegram_update.exe';
     } else if (Platform.isMacOS) {
-      return 'youdu_update.dmg';
+      return 'telegram_update.dmg';
     } else if (Platform.isLinux) {
-      return 'youdu_update.AppImage';
+      return 'telegram_update.AppImage';
     } else if (Platform.isAndroid) {
-      return 'youdu_update.apk';
+      return 'telegram_update.apk';
     } else if (Platform.isIOS) {
-      return 'youdu_update.ipa';
+      return 'telegram_update.ipa';
     }
-    return 'youdu_update';
+    return 'telegram_update';
   }
 
   /// 安装更新（移动端）
@@ -612,7 +612,7 @@ class UpdateService {
       final downloadUrl = updateInfo.downloadUrl;
       final urlFileName = path.basename(Uri.parse(downloadUrl).path);
       final fileExtension = path.extension(urlFileName).toLowerCase();
-      final zipFile = path.join(tmpDir, 'youdu_update$fileExtension');
+      final zipFile = path.join(tmpDir, 'telegram_update$fileExtension');
       
       logger.info('🪟 [Windows升级] 当前应用: $currentExePath');
       logger.info('📁 [Windows升级] 应用目录: $appDir');
@@ -631,7 +631,7 @@ class UpdateService {
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 echo ========================================
-echo           Youdu Update Script
+echo           Telegram Update Script
 echo ========================================
 echo.
 
@@ -834,7 +834,7 @@ exit
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 echo ========================================
-echo           Youdu Update Script
+echo           Telegram Update Script
 echo ========================================
 echo.
 
@@ -907,7 +907,7 @@ exit
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 echo ========================================
-echo           Youdu Update Script (EXE)
+echo           Telegram Update Script (EXE)
 echo ========================================
 echo.
 
@@ -972,11 +972,11 @@ exit
   Future<bool> _startMacUpdater(String updateFilePath) async {
     try {
       final currentAppPath = Platform.resolvedExecutable;
-      // macOS应用路径: /Applications/Youdu.app/Contents/MacOS/youdu
+      // macOS应用路径: /Applications/Telegram.app/Contents/MacOS/Telegram
       final appBundlePath = path.dirname(path.dirname(path.dirname(currentAppPath)));
       final appName = path.basename(appBundlePath).replaceAll('.app', '');
       
-      final updaterScript = path.join(Directory.systemTemp.path, 'youdu_updater.sh');
+      final updaterScript = path.join(Directory.systemTemp.path, 'telegram_updater.sh');
       final scriptContent = '''
 #!/bin/bash
 echo "正在准备更新..."
@@ -1026,7 +1026,7 @@ rm "\$0"
       final appDir = path.dirname(currentAppPath);
       final appName = path.basename(currentAppPath);
       
-      final updaterScript = path.join(Directory.systemTemp.path, 'youdu_updater.sh');
+      final updaterScript = path.join(Directory.systemTemp.path, 'telegram_updater.sh');
       final scriptContent = '''
 #!/bin/bash
 echo "正在准备更新..."

@@ -9,7 +9,10 @@ import '../utils/logger.dart';
 /// 用于检测应用是否是全新安装（卸载后重装），如果是则清理残留的 Keychain 数据
 class FreshInstallService {
   static const String _installMarkerKey = 'app_install_marker';
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
+    // macOS 无开发者证书(ad-hoc 签名)时数据保护钥匙串会报 -34018，改用传统登录钥匙串
+    mOptions: MacOsOptions(useDataProtectionKeyChain: false),
+  );
   
   /// 检测并处理全新安装
   /// 返回 true 表示是全新安装并已清理数据
@@ -24,7 +27,7 @@ class FreshInstallService {
       
       // 1. 检查数据库文件是否存在（新旧文件名都检查）
       final dbPath = await getDatabasesPath();
-      final newDbFilePath = '$dbPath/youdu_local_storage.db';
+      final newDbFilePath = '$dbPath/telegram_local_storage.db';
       final oldDbFilePath1 = '$dbPath/youdu_storage.db';
       final oldDbFilePath2 = '$dbPath/youdu_messages.db';
       final newDbFile = File(newDbFilePath);
@@ -33,7 +36,7 @@ class FreshInstallService {
       final newDbExists = newDbFile.existsSync();
       final oldDbExists = oldDbFile1.existsSync() || oldDbFile2.existsSync();
       
-      logger.debug('🔍 [全新安装检测] 新数据库文件(youdu_local_storage.db)存在: $newDbExists');
+      logger.debug('🔍 [全新安装检测] 新数据库文件(telegram_local_storage.db)存在: $newDbExists');
       logger.debug('🔍 [全新安装检测] 旧数据库文件存在: $oldDbExists');
       
       // 2. 检查 Keychain 中是否有数据
@@ -209,8 +212,8 @@ class FreshInstallService {
           final fileName = file.path.split('/').last;
           logger.debug('🔍 [数据库清理] 发现文件: $fileName');
           
-          // 删除所有 youdu 相关的数据库文件
-          if (fileName.startsWith('youdu') && fileName.endsWith('.db')) {
+          // 删除所有 telegram/youdu(旧名) 相关的数据库文件
+          if ((fileName.startsWith('telegram') || fileName.startsWith('youdu')) && fileName.endsWith('.db')) {
             logger.debug('🧹 [数据库清理] 删除残留数据库文件: $fileName');
             try {
               await file.delete();
@@ -221,7 +224,7 @@ class FreshInstallService {
           }
           
           // 同时删除 SQLite 的 journal 和 wal 文件
-          if (fileName.contains('youdu') && 
+          if ((fileName.contains('telegram') || fileName.contains('youdu')) &&
               (fileName.endsWith('-journal') || fileName.endsWith('-wal') || fileName.endsWith('-shm'))) {
             logger.debug('🧹 [数据库清理] 删除残留临时文件: $fileName');
             try {

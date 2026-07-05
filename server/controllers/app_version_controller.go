@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"youdu-server/db"
+	"telegram-server/db"
 )
 
 // AppVersionController 应用版本控制器

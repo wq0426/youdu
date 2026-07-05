@@ -853,7 +853,8 @@ CREATE TABLE public.groups (
     all_muted boolean DEFAULT false NOT NULL,
     invite_confirmation boolean DEFAULT false,
     admin_only_edit_name boolean DEFAULT false NOT NULL,
-    member_view_permission boolean DEFAULT true
+    member_view_permission boolean DEFAULT true,
+    agora_group_id character varying(64)
 );
 
 

@@ -108,3 +108,14 @@
     public static *** v(...);
     public static *** i(...);
 }
+
+# ========== Agora Chat (环信 Hyphenate) SDK ==========
+-keep class com.hyphenate.** { *; }
+-dontwarn com.hyphenate.**
+
+# 环信 SDK 内部引用的厂商推送 SDK（项目未集成这些 SDK，仅屏蔽 R8 缺类报错；
+# 运行时环信会检测到类不存在而跳过对应厂商通道，不影响功能）
+-dontwarn com.heytap.msp.push.**
+-dontwarn com.meizu.cloud.pushsdk.**
+-dontwarn com.vivo.push.**
+-dontwarn com.xiaomi.mipush.sdk.**

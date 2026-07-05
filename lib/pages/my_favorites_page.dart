@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:youdu/models/favorite_common_model.dart';
-import 'package:youdu/models/online_notification_model.dart';
-import 'package:youdu/services/api_service.dart';
-import 'package:youdu/utils/storage.dart';
+import 'package:telegram/models/favorite_common_model.dart';
+import 'package:telegram/models/online_notification_model.dart';
+import 'package:telegram/services/api_service.dart';
+import 'package:telegram/utils/storage.dart';
 
 /// 我的常用页面
 class MyFavoritesPage extends StatefulWidget {

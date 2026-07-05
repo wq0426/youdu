@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as path;
-import 'package:youdu/config/api_config.dart';
+import 'package:telegram/config/api_config.dart';
 import '../utils/logger.dart';
 
 /// OSS分片直传服务

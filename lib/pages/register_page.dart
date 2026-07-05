@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:youdu/services/api_service.dart';
+import 'package:telegram/services/api_service.dart';
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});

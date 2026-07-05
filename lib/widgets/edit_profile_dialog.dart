@@ -1,8 +1,10 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:youdu/services/api_service.dart';
+import 'package:telegram/services/api_service.dart';
+import '../services/websocket_service.dart';
 import '../constants/upload_limits.dart';
+import '../utils/storage.dart';
 import '../utils/logger.dart';
 
 // 全局变量：跟踪文件选择器状态（供 HomePage 访问）
@@ -442,6 +444,24 @@ class _EditProfileDialogState extends State<EditProfileDialog> {
             });
 
             logger.debug('✅ [头像更换] setState 执行完成（保存成功后），mounted 状态: $mounted');
+
+            // 🔴 本地立即刷新自身头像：
+            // 1) 写入本地缓存，保证之后发出的消息携带的是新头像；
+            // 2) 广播本地 avatar_updated 事件，复用桌面端现有全链路刷新逻辑，
+            //    让会话列表 / 聊天历史里的头像立即更新，无需等待新消息驱动。
+            try {
+              await Storage.saveAvatar(uploadedUrl);
+              final currentUserId = await Storage.getUserId();
+              if (currentUserId != null) {
+                WebSocketService()
+                    .broadcastLocalAvatarUpdated(currentUserId, uploadedUrl);
+                logger.debug('🎭 [头像更换] 已本地广播自身头像更新事件 - userId=$currentUserId');
+              } else {
+                logger.debug('⚠️ [头像更换] 本地头像刷新失败：无法获取当前用户ID');
+              }
+            } catch (e) {
+              logger.debug('⚠️ [头像更换] 本地头像刷新失败: $e');
+            }
 
             // 通知主页面更新头像
             logger.debug('📸 [头像更换] 准备调用 onSave 回调');

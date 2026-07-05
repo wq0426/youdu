@@ -3,9 +3,9 @@ package controllers
 import (
 	"database/sql"
 
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/utils"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/utils"
 
 	"github.com/gin-gonic/gin"
 )

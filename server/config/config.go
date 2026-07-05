@@ -43,6 +43,13 @@ type Config struct {
 	AgoraAppID          string
 	AgoraAppCertificate string
 
+	// Agora Chat 即时通讯
+	// AgoraChatAppKey: 控制台「即时通讯」的 AppKey，格式 orgName#appName
+	// AgoraChatRestHost: Chat RESTful API 域名（区域相关，如 a1.chat.agora.io），用于服务端注册用户等
+	// Chat 的 token 复用上面的 AgoraAppID / AgoraAppCertificate（同一 Agora 项目）
+	AgoraChatAppKey   string
+	AgoraChatRestHost string
+
 	// TRTC 腾讯云实时音视频
 	TRTCSDKAppID  int
 	TRTCSecretKey string
@@ -160,6 +167,8 @@ func LoadConfig(debugMode bool, overseasMode bool) {
 		AppEnv:                  appEnv,
 		AgoraAppID:              getEnvViper("AGORA_APP_ID", ""),
 		AgoraAppCertificate:     getEnvViper("AGORA_APP_CERTIFICATE", ""),
+		AgoraChatAppKey:         getEnvViper("AGORA_CHAT_APP_KEY", ""),
+		AgoraChatRestHost:       getEnvViper("AGORA_CHAT_REST_HOST", ""),
 		TRTCSDKAppID:            trtcSDKAppID,
 		TRTCSecretKey:           getEnvViper("TENCENT_CALL_APPSECRET", ""),
 		RedisHost:               getEnvViper("REDIS_HOST", "127.0.0.1"),

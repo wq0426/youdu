@@ -74,8 +74,8 @@ class Logger {
       final now = DateTime.now();
       final dateStr = DateFormat('yyyy-MM-dd').format(now);
       final logFileName = userId != null
-          ? 'youdu_${userId}_$dateStr.log'
-          : 'youdu_$dateStr.log';
+          ? 'telegram_${userId}_$dateStr.log'
+          : 'telegram_$dateStr.log';
       _logFile = File('${logsDir.path}/$logFileName');
 
       // 检查日志文件是否存在异常（如大量空字符）

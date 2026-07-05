@@ -194,8 +194,11 @@ func (r *ContactRepository) GetContactsByUserID(userID int) ([]ContactInfo, erro
 		LEFT JOIN user_relations ur2 ON ur2.user_id = u.id AND ur2.friend_id = $1
 		WHERE (
 			(ur1.approval_status = 'approved' AND COALESCE(ur1.is_deleted, false) = false)
-			OR 
+			OR
 			(ur2.approval_status = 'approved' AND COALESCE(ur2.is_deleted, false) = false)
+			OR
+			-- 当前用户发起的、还在等待对方审核的好友请求（发起方需要在"新联系人"中看到等待验证状态）
+			(ur1.approval_status = 'pending' AND COALESCE(ur1.is_deleted, false) = false)
 		)
 		AND u.id != $1
 		ORDER BY 
@@ -353,46 +356,31 @@ type SearchContactResult struct {
 
 // SearchContacts 根据关键字搜索联系人
 func (r *ContactRepository) SearchContacts(userID int, keyword string) ([]SearchContactResult, error) {
+	// 🔵 阶段6：最近消息预览已迁移到 Agora Chat（会话列表由客户端从 Agora 会话生成），
+	// 此处不再 JOIN messages 表；last_message 返回空串，排序退化为按用户创建时间。
 	query := `
 		WITH user_contacts AS (
 			-- 获取用户的所有已通过审核的联系人（双向关系）
 			SELECT DISTINCT
-				CASE 
+				CASE
 					WHEN user_id = $1 THEN friend_id
 					ELSE user_id
 				END as contact_id
 			FROM user_relations
 			WHERE (user_id = $1 OR friend_id = $1) AND approval_status = 'approved'
-		),
-		last_messages AS (
-			-- 获取每个联系人的最后一条消息
-			SELECT 
-				CASE 
-					WHEN sender_id = $1 THEN receiver_id
-					ELSE sender_id
-				END as contact_id,
-				MAX(created_at) as last_time
-			FROM messages
-			WHERE sender_id = $1 OR receiver_id = $1
-			GROUP BY contact_id
 		)
-		SELECT 
+		SELECT
 			u.id as user_id,
 			u.username,
 			COALESCE(u.full_name, '') as full_name,
 			COALESCE(u.avatar, '') as avatar,
 			COALESCE(u.status, 'offline') as status,
-			COALESCE(lm.last_time, u.created_at) as last_message_time,
-			COALESCE(m.content, '') as last_message
+			u.created_at as last_message_time,
+			'' as last_message
 		FROM user_contacts uc
 		JOIN users u ON u.id = uc.contact_id
-		LEFT JOIN last_messages lm ON lm.contact_id = uc.contact_id
-		LEFT JOIN messages m ON (
-			(m.sender_id = uc.contact_id AND m.receiver_id = $1) OR
-			(m.sender_id = $1 AND m.receiver_id = uc.contact_id)
-		) AND m.created_at = lm.last_time
 		WHERE u.username ILIKE $2 OR COALESCE(u.full_name, '') ILIKE $2
-		ORDER BY COALESCE(lm.last_time, u.created_at) DESC
+		ORDER BY u.created_at DESC
 	`
 
 	// 添加通配符进行模糊搜索

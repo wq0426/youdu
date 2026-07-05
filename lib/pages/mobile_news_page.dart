@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../utils/logger.dart';
+import '../theme/app_theme.dart';
 
 /// 移动端资讯页面
 class MobileNewsPage extends StatefulWidget {
@@ -133,7 +134,10 @@ class _MobileNewsPageState extends State<MobileNewsPage>
                     title: Text(site['name']!),
                     subtitle: Text(
                       site['url']!,
-                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                      style: TextStyle(
+                        color: AppColors.of(context).secondaryText,
+                        fontSize: 12,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -161,7 +165,7 @@ class _MobileNewsPageState extends State<MobileNewsPage>
           Container(
             height: 44,
             decoration: BoxDecoration(
-              color: Colors.white,
+              color: AppColors.of(context).surface,
               boxShadow: [
                 BoxShadow(
                   color: Colors.grey.withOpacity(0.2),

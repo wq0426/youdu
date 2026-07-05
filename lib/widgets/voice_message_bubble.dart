@@ -4,8 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart' as just_audio;
 import 'package:audioplayers/audioplayers.dart' as audioplayers;
-import 'package:path_provider/path_provider.dart';
-import 'package:http/http.dart' as http;
+import '../services/media_cache_service.dart';
 import '../utils/logger.dart';
 
 /// 语音消息气泡组件
@@ -19,12 +18,14 @@ class VoiceMessageBubble extends StatefulWidget {
   final String url; // 语音文件URL
   final int duration; // 语音时长（秒）
   final bool isMe; // 是否是自己发送的消息
+  final Widget? timeWidget; // Telegram 风格：气泡内右下角的时间/已读状态
 
   const VoiceMessageBubble({
     super.key,
     required this.url,
     required this.duration,
     required this.isMe,
+    this.timeWidget,
   });
 
   @override
@@ -167,36 +168,16 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
     super.dispose();
   }
 
-  /// 下载语音文件到本地缓存
+  /// 获取本地缓存的语音文件（未缓存则下载后缓存）。
+  /// 📦 统一走 MediaCacheService：持久目录 + 归一化key(兼容OSS签名URL) + LRU 上限，
+  /// 同一条语音全生命周期只下载一次。失败返回 null，调用方回退 URL 播放。
   Future<String?> _downloadVoiceFile() async {
-    try {
-      if (_localFilePath != null && File(_localFilePath!).existsSync()) {
-        return _localFilePath;
-      }
-
-      logger.debug('🎤 开始下载语音文件: ${widget.url}');
-      
-      final tempDir = await getTemporaryDirectory();
-      final fileName = widget.url.split('/').last;
-      final filePath = '${tempDir.path}/voice_cache/$fileName';
-      
-      final file = File(filePath);
-      await file.parent.create(recursive: true);
-      
-      final response = await http.get(Uri.parse(widget.url));
-      if (response.statusCode == 200) {
-        await file.writeAsBytes(response.bodyBytes);
-        _localFilePath = filePath;
-        logger.debug('✅ 语音文件下载成功: $filePath');
-        return filePath;
-      } else {
-        logger.error('❌ 下载语音文件失败: HTTP ${response.statusCode}');
-        return null;
-      }
-    } catch (e) {
-      logger.error('❌ 下载语音文件异常', error: e);
-      return null;
+    if (_localFilePath != null && File(_localFilePath!).existsSync()) {
+      return _localFilePath;
     }
+    final file = await MediaCacheService().cacheVoice(widget.url);
+    _localFilePath = file?.path;
+    return _localFilePath;
   }
 
   Future<void> _togglePlay() async {
@@ -213,7 +194,14 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
           setState(() {
             _isLoading = true;
           });
-          await _audioPlayersPlayer!.play(audioplayers.UrlSource(widget.url));
+          // 📦 三端统一：优先本地缓存播放（只下载一次），失败回退 URL 流式
+          final localPath = await _downloadVoiceFile();
+          if (localPath != null) {
+            await _audioPlayersPlayer!
+                .play(audioplayers.DeviceFileSource(localPath));
+          } else {
+            await _audioPlayersPlayer!.play(audioplayers.UrlSource(widget.url));
+          }
           setState(() {
             _isPlaying = true;
             _isLoading = false;
@@ -230,14 +218,10 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
               _isLoading = true;
             });
 
-            // 对于 iOS，先下载到本地再播放（兼容性更好）
-            if (Platform.isIOS) {
-              final localPath = await _downloadVoiceFile();
-              if (localPath != null) {
-                await _justAudioPlayer!.setFilePath(localPath);
-              } else {
-                await _justAudioPlayer!.setUrl(widget.url);
-              }
+            // 📦 三端统一：优先本地缓存播放（只下载一次），失败回退 URL 流式
+            final localPath = await _downloadVoiceFile();
+            if (localPath != null) {
+              await _justAudioPlayer!.setFilePath(localPath);
             } else {
               await _justAudioPlayer!.setUrl(widget.url);
             }
@@ -292,38 +276,50 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
             ),
           ],
         ),
-        child: Row(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: _isLoading
-                  ? const CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.grey),
-                    )
-                  : AnimatedIcon(
-                      icon: AnimatedIcons.play_pause,
-                      progress: _animationController,
-                      size: 18,
-                      color: widget.isMe ? Colors.black87 : Colors.grey[700],
-                    ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: _isLoading
+                      ? const CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.grey),
+                        )
+                      : AnimatedIcon(
+                          icon: AnimatedIcons.play_pause,
+                          progress: _animationController,
+                          size: 18,
+                          color: widget.isMe ? Colors.black87 : Colors.grey[700],
+                        ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _buildWaveform(progress),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _isPlaying
+                      ? _formatDuration(_currentPosition.inSeconds)
+                      : _formatDuration(widget.duration),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: widget.isMe ? Colors.black54 : Colors.grey[600],
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: _buildWaveform(progress),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              _isPlaying
-                  ? _formatDuration(_currentPosition.inSeconds)
-                  : _formatDuration(widget.duration),
-              style: TextStyle(
-                fontSize: 11,
-                color: widget.isMe ? Colors.black54 : Colors.grey[600],
+            // Telegram 风格：气泡内右下角时间
+            if (widget.timeWidget != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: widget.timeWidget!,
               ),
-            ),
           ],
         ),
       ),

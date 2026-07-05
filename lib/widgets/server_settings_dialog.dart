@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:youdu/config/api_config.dart';
+import 'package:telegram/config/api_config.dart';
 import '../utils/logger.dart';
 
 class ServerSettingsDialog extends StatefulWidget {

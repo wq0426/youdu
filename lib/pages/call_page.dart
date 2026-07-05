@@ -62,6 +62,8 @@ class _CallPageState extends State<CallPage> {
   int _callDuration = 0;
   bool _isClosing = false;
   bool _disposed = false;
+  // 🔴 本地是否点了"拒绝"：pop 时返回 callRejected，由 home 页发送拒绝消息（只有拒绝方发送）
+  bool _didReject = false;
 
   Timer? _durationTimer;
   String _statusText = '正在连接...';
@@ -362,6 +364,9 @@ class _CallPageState extends State<CallPage> {
     if (mounted) {
       Navigator.of(context).pop({
         'callEnded': true,
+        // 🔴 本地拒接时返回 callRejected，home 页据此发送拒绝消息（拒绝方发送）
+        'callRejected': _didReject,
+        'callType': widget.callType,
         'callDuration': _callDuration,
         'isLocalHangup': _callService.isLocalHangup,
         'isCallEnded': isLastMember,
@@ -390,10 +395,19 @@ class _CallPageState extends State<CallPage> {
 
   Future<void> _playWaitingSound() async {
     if (_disposed || !mounted) return;
+    // 🔴 已在播放则直接返回，避免重复创建播放器：
+    // 旧实例被覆盖后无人引用，_stopSound 停不掉，导致接通/挂断后等待音仍在循环
+    if (_waitingPlayer != null) return;
+    final player = AudioPlayer();
+    _waitingPlayer = player;
     try {
-      _waitingPlayer = AudioPlayer();
-      await _waitingPlayer!.setReleaseMode(ReleaseMode.loop);
-      await _waitingPlayer!.play(AssetSource('mp3/wait.mp3'));
+      await player.setReleaseMode(ReleaseMode.loop);
+      await player.play(AssetSource('mp3/wait.mp3'));
+      // 🔴 播放启动期间可能已被 _stopSound 停止（接通/挂断先到），此时立即停掉
+      if (_waitingPlayer != player) {
+        await player.stop();
+        await player.dispose();
+      }
     } catch (_) {}
   }
 
@@ -407,10 +421,14 @@ class _CallPageState extends State<CallPage> {
 
   Future<void> _acceptCall() async => _callService.acceptCall();
 
-  Future<void> _rejectCall() async => _callService.rejectCall();
+  Future<void> _rejectCall() async {
+    _didReject = true;
+    await _callService.rejectCall();
+  }
 
   Future<void> _endCall() async {
     if (_callState == CallState.ringing && widget.isIncoming) {
+      _didReject = true;
       await _callService.rejectCall();
     } else {
       await _callService.endCall(isLocalHangup: true);

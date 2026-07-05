@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import '../models/message_model.dart';
@@ -5,6 +6,7 @@ import '../utils/logger.dart';
 import '../utils/storage.dart';
 import 'local_database_service.dart';
 import 'api_service.dart';
+import 'agora_chat_service.dart';
 
 /// 消息服务 - 统一管理私聊和群聊消息
 /// 所有消息都存储在本地SQLite数据库中
@@ -186,30 +188,20 @@ class MessageService {
     }
   }
 
-  /// 同步标记已读状态到服务器（私聊）
+  /// 同步私聊已读状态（迁移到 Agora Chat）
+  ///
+  /// 已读状态改由 Agora 会话已读回执承载（替代旧的 /api/messages/mark-read 写库）。
+  /// 单聊 conversationId = 对端用户ID字符串。
   Future<void> _syncMarkMessagesAsReadToServer(int senderId) async {
     try {
-      final token = await Storage.getToken();
-      if (token == null || token.isEmpty) {
-        logger.debug('⚠️ Token为空，无法同步已读状态到服务器');
-        return;
-      }
-
-      logger.debug('📤 [服务器同步] 开始同步已读状态 - senderId: $senderId');
-      final response = await ApiService.post(
-        '/api/messages/mark-read',
-        {'sender_id': senderId},
-        token: token,
+      final conversationId = senderId.toString();
+      await AgoraChatService().markConversationAllRead(
+        conversationId: conversationId,
       );
-
-      if (response['code'] == 0) {
-        final rowsAffected = response['data']?['rows_affected'] ?? 0;
-        logger.debug('✅ [服务器同步] 成功 - senderId: $senderId, 影响行数: $rowsAffected');
-      } else {
-        logger.error('❌ [服务器同步] 失败 - senderId: $senderId, 错误: ${response['message']}');
-      }
+      await AgoraChatService().sendConversationReadAck(conversationId);
+      logger.debug('✅ [Agora已读] 私聊会话已读已同步 - senderId: $senderId');
     } catch (e) {
-      logger.error('❌ [服务器同步] 异常 - senderId: $senderId, 错误: $e');
+      logger.error('❌ [Agora已读] 私聊会话已读同步异常 - senderId: $senderId, 错误: $e');
       // 不抛出异常，因为本地已经标记成功
     }
   }
@@ -268,7 +260,8 @@ class MessageService {
         return '[视频]';
       case 'call_ended':
       case 'call_ended_video':
-        return '[通话结束]';
+        // Telegram 风格：自己发起的通话显示"拨出"，对方发起显示"来电"
+        return isSender ? '拨出' : '来电';
       // 🔴 修复：通话拒绝消息根据当前用户是发送者还是接收者显示不同内容
       case 'call_rejected':
       case 'call_rejected_video':
@@ -348,24 +341,38 @@ class MessageService {
         hasToken && (forceRefresh || missingName || (snapshot != null && _isSnapshotExpired(snapshot)));
 
     if (shouldRefresh) {
-      final remote = await _fetchContactSnapshotFromApi(
-        ownerId: ownerId,
-        contactId: contactId,
-        contactType: normalizedType,
-        token: token!,
-      );
-      if (remote != null) {
-        await _localDb.upsertContactSnapshot(
+      // 🚀 优化：仅在「无可展示数据」（快照缺失/无名字）或显式要求时才阻塞等待 HTTP；
+      // 快照只是过期（TTL 12h）时先返回旧数据供首屏渲染，HTTP 刷新放后台执行，
+      // 完成后经 onSnapshotsRefreshed 通知会话列表刷新（UI 侧防抖合并）。
+      // 否则每隔 12h 的首次打开，N 个会话 = N 个并发 HTTP 一起挡住首屏。
+      final bool blocking = forceRefresh || missingName;
+      if (blocking) {
+        final remote = await _fetchContactSnapshotFromApi(
           ownerId: ownerId,
           contactId: contactId,
           contactType: normalizedType,
-          username: remote['username'] as String?,
-          fullName: remote['full_name'] as String?,
-          avatar: remote['avatar'] as String?,
-          remark: remote['remark'] as String?,
-          metadata: remote['metadata'] as String?,
+          token: token!,
         );
-        snapshot = remote;
+        if (remote != null) {
+          await _localDb.upsertContactSnapshot(
+            ownerId: ownerId,
+            contactId: contactId,
+            contactType: normalizedType,
+            username: remote['username'] as String?,
+            fullName: remote['full_name'] as String?,
+            avatar: remote['avatar'] as String?,
+            remark: remote['remark'] as String?,
+            metadata: remote['metadata'] as String?,
+          );
+          snapshot = remote;
+        }
+      } else {
+        unawaited(_refreshSnapshotInBackground(
+          ownerId: ownerId,
+          contactId: contactId,
+          contactType: normalizedType,
+          token: token!,
+        ));
       }
     }
 
@@ -390,6 +397,49 @@ class MessageService {
     }
 
     return snapshot;
+  }
+
+  /// 🚀 联系人快照后台刷新完成后的通知（用于会话列表刷新名称/头像）。
+  /// 由 UI 层注入（如 MobileChatListPage.needRefresh），避免 service→page 反向依赖。
+  /// 多次触发由 UI 侧防抖合并。
+  static void Function()? onSnapshotsRefreshed;
+
+  /// 🚀 后台刷新过期的联系人快照（同一联系人并发去重）
+  static final Set<String> _snapshotRefreshInFlight = {};
+
+  Future<void> _refreshSnapshotInBackground({
+    required int ownerId,
+    required int contactId,
+    required String contactType,
+    required String token,
+  }) async {
+    final key = '$ownerId:$contactType:$contactId';
+    if (!_snapshotRefreshInFlight.add(key)) return; // 已有同款刷新在跑
+    try {
+      final remote = await _fetchContactSnapshotFromApi(
+        ownerId: ownerId,
+        contactId: contactId,
+        contactType: contactType,
+        token: token,
+      );
+      if (remote != null) {
+        await _localDb.upsertContactSnapshot(
+          ownerId: ownerId,
+          contactId: contactId,
+          contactType: contactType,
+          username: remote['username'] as String?,
+          fullName: remote['full_name'] as String?,
+          avatar: remote['avatar'] as String?,
+          remark: remote['remark'] as String?,
+          metadata: remote['metadata'] as String?,
+        );
+        onSnapshotsRefreshed?.call();
+      }
+    } catch (e) {
+      logger.debug('❌ 后台刷新联系人快照失败: $e');
+    } finally {
+      _snapshotRefreshInFlight.remove(key);
+    }
   }
 
   Future<Map<String, dynamic>?> _fetchContactSnapshotFromApi({
@@ -504,298 +554,130 @@ class MessageService {
   }
 
   /// 获取最近联系人列表
-  Future<Map<String, dynamic>> getRecentContacts() async {
+  ///
+  /// 阶段5：会话列表来源切换为 Agora Chat（消息已迁移到 Agora，后端/本地SQLite 不再有新消息）。
+  /// 由 Agora 会话拿到最后一条消息 + 未读数，名称/头像复用联系人/群组快照（后端 roster 仍可用）。
+  Future<Map<String, dynamic>> getRecentContacts({bool preferLocal = true}) async {
     try {
       final currentUserId = await Storage.getUserId();
       if (currentUserId == null) {
         return {'code': -1, 'message': '未登录', 'data': null};
       }
 
-      final rawContacts = await _localDb.getRecentContacts(currentUserId);
-      logger.debug('📊 获取到原始联系人数据: ${rawContacts.length}条');
-      if (rawContacts.isNotEmpty) {
-        logger.debug('📊 第一条数据示例: ${rawContacts.first}');
-      }
-
       final authToken = await Storage.getToken();
       final pendingContactIds =
           await Storage.getPendingContactsForCurrentUser();
-      if (pendingContactIds.isNotEmpty) {
-        logger.debug('🚧 待审核联系人: $pendingContactIds');
-      }
 
-      // 🔴 修复：从服务器获取用户所属的群组列表，并同步群组成员到本地数据库
-      logger.debug('🔍 开始从服务器获取用户所属的群组列表...');
-      Set<int> userGroupIds = {};
-      if (authToken != null && authToken.isNotEmpty) {
-        try {
-          final groupsResponse = await ApiService.getUserGroups(token: authToken);
-          logger.debug('📡 服务器响应: code=${groupsResponse['code']}, message=${groupsResponse['message']}');
-          
-          if (groupsResponse['code'] == 0) {
-            final groups = groupsResponse['data']?['groups'] as List?;
-            if (groups != null && groups.isNotEmpty) {
-              userGroupIds = groups
-                  .map((g) => g['id'] as int?)
-                  .whereType<int>()
-                  .toSet();
+      // 默认本地优先：进会话列表时直接读 Agora 本地库，秒出且不联网；
+      // 本地为空（首登/换机）会自动回退服务端拉取。
+      final summaries =
+          await AgoraChatService().buildConversationSummaries(preferLocal: preferLocal);
+      logger.debug('📊 [RecentContacts] Agora 会话 ${summaries.length} 个');
 
-              // 🆕 同步群组成员到本地数据库（用于SQL过滤）
-              for (final group in groups) {
-                final groupId = group['id'] as int?;
-                if (groupId != null) {
-                  // 简化版：只记录当前用户属于这个群组
-                  await _localDb.addGroupMember(groupId, currentUserId);
-                }
-              }
-              logger.debug('✅ 群组成员同步完成');
-            } else {
-              logger.debug('📭 用户当前没有加入任何群组');
-            }
-          } else {
-            logger.debug('⚠️ 获取群组列表失败: ${groupsResponse['message']}');
-          }
-        } catch (e) {
-          logger.debug('❌ 获取用户群组列表异常: $e');
-        }
-      } else {
-        logger.debug('⚠️ Token为空，无法获取用户群组列表');
-      }
-
-      // 转换数据格式：将数据库的消息记录转换为RecentContactModel期望的格式
       final contactsFutures =
-          rawContacts.map<Future<Map<String, dynamic>?>>((msg) async {
+          summaries.map<Future<Map<String, dynamic>?>>((s) async {
         try {
-          // 安全获取字段
-          final contactType = msg['contact_type']?.toString() ?? 'user';
-          final senderId = msg['sender_id'] is int
-              ? msg['sender_id'] as int
-              : int.tryParse(msg['sender_id']?.toString() ?? '') ?? 0;
-          final receiverId = msg['receiver_id'] is int
-              ? msg['receiver_id'] as int
-              : int.tryParse(msg['receiver_id']?.toString() ?? '') ?? 0;
-          final contactId = msg['contact_id'] is int
-              ? msg['contact_id'] as int
-              : int.tryParse(msg['contact_id']?.toString() ?? '') ?? 0;
+          final contactType = s.isGroup ? 'group' : 'user';
+          final contactId = s.peerId;
 
-          // 获取消息内容和类型
-          final content = msg['content']?.toString() ?? '';
-          final messageType = msg['message_type']?.toString() ?? 'text';
-          final fileName = msg['file_name']?.toString();
-
-          // 🔴 判断当前用户是否是消息的发送者（用于通话拒绝/取消消息的显示）
-          final isSender = senderId == currentUserId;
-
-          // 格式化消息预览
-          final formattedMessage = _formatMessagePreview(
-            messageType,
-            content,
-            fileName,
-            isSender: isSender,
-          );
-
-          int actualContactId = contactId;
-
-          if (contactType != 'group') {
-            actualContactId =
-                senderId == currentUserId ? receiverId : senderId;
-            if (actualContactId == 0) {
-              actualContactId = contactId;
-            }
-
-            if (pendingContactIds.contains(actualContactId)) {
-              logger.debug(
-                '⏭️ 联系人 $actualContactId 仍在待审核，跳过最近联系人列表',
-              );
-              return null;
-            }
+          // 私聊：过滤仍在待审核的联系人
+          if (!s.isGroup && pendingContactIds.contains(contactId)) {
+            return null;
           }
-          // 🔴 群组过滤已在SQL层面完成（通过INNER JOIN group_members），无需在这里过滤
 
-          // 根据类型确定联系人信息
-          String contactUsername;
-          String contactFullName;
+          final last = s.lastMessage;
+          final isSender = last != null && last.senderId == currentUserId;
+          final formattedMessage = last == null
+              ? ''
+              : _formatMessagePreview(
+                  last.messageType,
+                  last.content,
+                  last.fileName,
+                  voiceDuration: last.voiceDuration,
+                  isSender: isSender,
+                );
+          final lastMessageStatus = last?.status;
+          final lastMessageTime =
+              (last?.createdAt ?? DateTime.now()).toIso8601String();
+
+          // 名称/头像：复用联系人/群组快照
+          String contactUsername = contactId.toString();
+          String contactFullName = contactId.toString();
           String? contactAvatar;
-          String? contactRemark; // 🔴 用户备注（仅用户类型有效）
-          int unreadCount = 0;
+          String? contactRemark;
 
-          if (contactType == 'group') {
-            final dbGroupName = msg['group_name']?.toString();
-            String contactGroupName = (dbGroupName ?? '').trim();
-            // 🔴 修复：使用group_avatar而不是sender_avatar
-            contactAvatar = msg['group_avatar']?.toString();
-
-            final snapshot = await _getOrFetchContactSnapshot(
-              ownerId: currentUserId,
-              contactId: contactId,
-              contactType: 'group',
-              token: authToken,
-              forceRefresh: contactGroupName.isEmpty ||
-                  _isGeneratedGroupName(contactGroupName, contactId),
-              fallbackName:
-                  contactGroupName.isNotEmpty ? contactGroupName : null,
-              fallbackAvatar: contactAvatar,
-            );
-
-            if (snapshot != null) {
-              final cachedName =
-                  snapshot['full_name']?.toString() ??
-                  snapshot['username']?.toString();
-              if (cachedName != null && cachedName.trim().isNotEmpty) {
-                contactGroupName = cachedName.trim();
-              }
-              final cachedAvatar = snapshot['avatar']?.toString();
-              if (cachedAvatar != null && cachedAvatar.isNotEmpty) {
-                contactAvatar = cachedAvatar;
-              }
+          final snapshot = await _getOrFetchContactSnapshot(
+            ownerId: currentUserId,
+            contactId: contactId,
+            contactType: contactType,
+            token: authToken,
+            forceRefresh: false,
+          );
+          if (snapshot != null) {
+            final cachedFullName = snapshot['full_name']?.toString();
+            final cachedUsername = snapshot['username']?.toString();
+            if (cachedFullName != null && cachedFullName.trim().isNotEmpty) {
+              contactFullName = cachedFullName.trim();
+            } else if (cachedUsername != null &&
+                cachedUsername.trim().isNotEmpty) {
+              contactFullName = cachedUsername.trim();
             }
-
-            if (contactGroupName.isEmpty) {
-              contactGroupName = '群聊$contactId';
+            if (cachedUsername != null && cachedUsername.trim().isNotEmpty) {
+              contactUsername = cachedUsername.trim();
             }
-
-            contactUsername = contactGroupName;
-            contactFullName = contactGroupName;
-            // 🔴 优化：直接使用SQL查询返回的未读数，避免额外查询
-            unreadCount = msg['unread_count'] is int
-                ? msg['unread_count'] as int
-                : int.tryParse(msg['unread_count']?.toString() ?? '0') ?? 0;
-          } else if (contactType == 'file_assistant') {
-            // 处理文件传输助手
-            contactUsername = '文件传输助手';
-            contactFullName = '文件传输助手';
-            contactAvatar = null; // 文件传输助手使用默认图标
-            actualContactId = 0; // 使用0表示文件传输助手
-            unreadCount = 0; // 文件传输助手暂不计算未读数
-            logger.debug('📁 文件传输助手已添加到最近联系人列表');
-          } else {
-            // 获取联系人账号（通常是用户名）
-            String? dbContactUsername = senderId == currentUserId
-                ? msg['receiver_name']?.toString()
-                : msg['sender_name']?.toString();
-
-            contactUsername =
-                (dbContactUsername == null || dbContactUsername.isEmpty)
-                ? actualContactId.toString()
-                : dbContactUsername;
-            contactFullName = contactUsername;
-
-            contactAvatar = senderId == currentUserId
-                ? msg['receiver_avatar']?.toString()
-                : msg['sender_avatar']?.toString();
-
-            final snapshot = await _getOrFetchContactSnapshot(
-              ownerId: currentUserId,
-              contactId: actualContactId,
-              contactType: 'user',
-              token: authToken,
-              forceRefresh:
-                  contactFullName.isEmpty || _isNumericId(contactFullName),
-              fallbackName: contactFullName.isNotEmpty
-                  ? contactFullName
-                  : contactUsername,
-              fallbackAvatar: contactAvatar,
-            );
-
-            if (snapshot != null) {
-              final cachedFullName = snapshot['full_name']?.toString();
-              final cachedUsername = snapshot['username']?.toString();
-              if (cachedFullName != null && cachedFullName.trim().isNotEmpty) {
-                contactFullName = cachedFullName.trim();
-              } else if (cachedUsername != null &&
-                  cachedUsername.trim().isNotEmpty) {
-                contactFullName = cachedUsername.trim();
-              }
-              if (cachedUsername != null && cachedUsername.trim().isNotEmpty) {
-                contactUsername = cachedUsername.trim();
-              }
-              final cachedAvatar = snapshot['avatar']?.toString();
-              if (cachedAvatar != null && cachedAvatar.isNotEmpty) {
-                contactAvatar = cachedAvatar;
-              }
-              // 🔴 获取用户备注
-              final cachedRemark = snapshot['remark']?.toString();
-              if (cachedRemark != null && cachedRemark.trim().isNotEmpty) {
-                contactRemark = cachedRemark.trim();
-              }
-            } else {
-              logger.debug(
-                '⚠️ 联系人快照缺失，使用本地字段: contactId=$actualContactId',
-              );
+            final cachedAvatar = snapshot['avatar']?.toString();
+            if (cachedAvatar != null && cachedAvatar.isNotEmpty) {
+              contactAvatar = cachedAvatar;
             }
-
-            // 🔴 优化：直接使用SQL查询返回的未读数，避免额外查询
-            unreadCount = msg['unread_count'] is int
-                ? msg['unread_count'] as int
-                : int.tryParse(msg['unread_count']?.toString() ?? '0') ?? 0;
+            final cachedRemark = snapshot['remark']?.toString();
+            if (!s.isGroup &&
+                cachedRemark != null &&
+                cachedRemark.trim().isNotEmpty) {
+              contactRemark = cachedRemark.trim();
+            }
+          }
+          if (s.isGroup && contactFullName == contactId.toString()) {
+            contactFullName = '群聊$contactId';
+            contactUsername = contactFullName;
           }
 
-          final resolvedFullName = contactFullName.isNotEmpty
-              ? contactFullName
-              : contactUsername;
+          final resolvedFullName =
+              contactFullName.isNotEmpty ? contactFullName : contactUsername;
 
-          // 🔴 获取免打扰状态（从SharedPreferences查询）
           final contactKey = Storage.generateContactKey(
-            isGroup: contactType == 'group',
-            id: contactType == 'file_assistant' ? currentUserId : contactId,
+            isGroup: s.isGroup,
+            id: contactId,
           );
-          final doNotDisturb = await Storage.getDoNotDisturb(currentUserId, contactKey);
-
-          // 🔴 时区处理：本地数据库存储的时间已经是上海时区，直接使用
-          String lastMessageTime = msg['last_message_time']?.toString() ?? DateTime.now().toIso8601String();
-          
-          // 🔴 获取最后一条消息的状态（用于判断是否已撤回）
-          final lastMessageStatus = msg['status']?.toString();
+          final doNotDisturb =
+              await Storage.getDoNotDisturb(currentUserId, contactKey);
 
           return {
             'type': contactType,
-            'user_id': contactType == 'file_assistant' ? actualContactId : contactId,
+            'user_id': contactId,
             'username': contactUsername,
             'full_name': resolvedFullName,
             'avatar': contactAvatar,
             'last_message_time': lastMessageTime,
             'last_message': formattedMessage,
-            'last_message_status': lastMessageStatus, // 🔴 添加最后一条消息的状态
-            'unread_count': unreadCount,
+            'last_message_status': lastMessageStatus,
+            // Telegram 风格会话列表：自己发的最后一条消息显示单勾/双勾
+            'last_message_from_me': isSender,
+            'last_message_read': last?.isRead == true,
+            'unread_count': s.unreadCount,
             'status': 'offline',
-            'do_not_disturb': doNotDisturb, // 🔴 添加免打扰状态
-            // 🔴 添加用户备注（仅用户类型有效）
-            if (contactType != 'group' && contactType != 'file_assistant' && contactRemark != null) 
-              'remark': contactRemark,
-            if (contactType == 'group') 'group_id': contactId,
-            if (contactType == 'group') 'group_name': resolvedFullName,
-            if (contactType == 'file_assistant') 'is_file_assistant': true,
+            'do_not_disturb': doNotDisturb,
+            if (!s.isGroup && contactRemark != null) 'remark': contactRemark,
+            if (s.isGroup) 'group_id': contactId,
+            if (s.isGroup) 'group_name': resolvedFullName,
           };
-        } catch (e, stackTrace) {
-          logger.debug('❌ 处理联系人数据失败: $e');
-          logger.debug('❌ 问题数据: $msg');
-          logger.debug('❌ 堆栈: $stackTrace');
-          // 返回一个默认的联系人数据，避免整个列表加载失败
-          return {
-            'type': 'user',
-            'user_id': 0,
-            'username': 'Unknown',
-            'full_name': 'Unknown',
-            'avatar': null,
-            'last_message_time': DateTime.now().toIso8601String(),
-            'last_message': '[加载失败]',
-            'unread_count': 0,
-            'status': 'offline',
-          };
+        } catch (e) {
+          logger.debug('❌ [RecentContacts] 处理会话失败: $e');
+          return null;
         }
       });
 
       final contactsRaw = await Future.wait(contactsFutures);
-      final contacts =
-          contactsRaw.whereType<Map<String, dynamic>>().toList();
-
-      // 🔍 调试：打印转换后的前5个联系人
-      for (int i = 0; i < contacts.length && i < 5; i++) {
-        final contact = contacts[i];
-        final type = contact['type'] == 'group' ? '[群组]' : '[私聊]';
-        final name = contact['full_name'] ?? contact['username'] ?? 'Unknown';
-        final time = contact['last_message_time'];
-      }
+      final contacts = contactsRaw.whereType<Map<String, dynamic>>().toList();
 
       return {
         'code': 0,
@@ -807,6 +689,7 @@ class MessageService {
       return {'code': -1, 'message': '获取失败: $e', 'data': null};
     }
   }
+
 
   // ============ 群聊消息 ============
 
@@ -994,30 +877,25 @@ class MessageService {
     }
   }
 
-  /// 同步标记已读状态到服务器（群组）
+  /// 同步群组已读状态（迁移到 Agora Chat）
+  ///
+  /// 已读状态改由 Agora 会话已读回执承载（替代旧的 /api/messages/mark-group-read 写 group_message_reads 表）。
+  /// 群聊 conversationId = Agora 群会话ID（由本地群ID映射还原）。
   Future<void> _syncMarkGroupMessagesAsReadToServer(int groupId) async {
     try {
-      final token = await Storage.getToken();
-      if (token == null || token.isEmpty) {
-        logger.debug('⚠️ Token为空，无法同步群组已读状态到服务器');
+      final agoraGroupId = AgoraChatService().agoraGroupIdFor(groupId);
+      if (agoraGroupId == null || agoraGroupId.isEmpty) {
+        logger.debug('⚠️ [Agora已读] 群 $groupId 缺少 Agora 群ID映射，跳过群已读同步');
         return;
       }
-
-      logger.debug('📤 [服务器同步] 开始同步群组已读状态 - groupId: $groupId');
-      final response = await ApiService.post(
-        '/api/messages/mark-group-read',
-        {'group_id': groupId},
-        token: token,
+      await AgoraChatService().markConversationAllRead(
+        conversationId: agoraGroupId,
+        isGroup: true,
       );
-
-      if (response['code'] == 0) {
-        final rowsAffected = response['data']?['rows_affected'] ?? 0;
-        logger.debug('✅ [服务器同步] 群组已读成功 - groupId: $groupId, 影响行数: $rowsAffected');
-      } else {
-        logger.error('❌ [服务器同步] 群组已读失败 - groupId: $groupId, 错误: ${response['message']}');
-      }
+      await AgoraChatService().sendConversationReadAck(agoraGroupId);
+      logger.debug('✅ [Agora已读] 群会话已读已同步 - groupId: $groupId, agoraGroupId: $agoraGroupId');
     } catch (e) {
-      logger.error('❌ [服务器同步] 群组已读异常 - groupId: $groupId, 错误: $e');
+      logger.error('❌ [Agora已读] 群会话已读同步异常 - groupId: $groupId, 错误: $e');
       // 不抛出异常，因为本地已经标记成功
     }
   }

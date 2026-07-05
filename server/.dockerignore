@@ -12,7 +12,7 @@ postman_collection.json
 
 # Build files
 *.exe
-youdu-server
+telegram-server
 
 # IDE
 .vscode

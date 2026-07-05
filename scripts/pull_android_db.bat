@@ -55,13 +55,13 @@ echo.
 REM 3. Copy database from device to sdcard
 echo Step 3/4: Copy Database to SD Card
 echo --------------------------------------------
-echo    Database path: /data/data/com.example.youdu/databases/youdu_messages.db
+echo    Database path: /data/data/com.zhima.youdu.cn/databases/telegram_local_storage.db
 
 REM Execute copy command (requires root)
-adb shell "su -c 'cp /data/data/com.example.youdu/databases/youdu_messages.db /sdcard/'" >nul 2>&1
+adb shell "su -c 'cp /data/data/com.zhima.youdu.cn/databases/telegram_local_storage.db /sdcard/'" >nul 2>&1
 
 REM Check if copy succeeded
-adb shell "ls /sdcard/youdu_messages.db" 2>&1 | findstr "No such file" >nul
+adb shell "ls /sdcard/telegram_local_storage.db" 2>&1 | findstr "No such file" >nul
 if not errorlevel 1 (
     echo    [ERROR] Database copy failed
     echo.
@@ -73,11 +73,11 @@ if not errorlevel 1 (
     echo Please manually execute following commands to troubleshoot:
     echo    adb shell
     echo    su
-    echo    ls /data/data/com.example.youdu/databases/
+    echo    ls /data/data/com.zhima.youdu.cn/databases/
     exit /b 1
 )
 
-echo    [OK] Database copied to /sdcard/youdu_messages.db
+echo    [OK] Database copied to /sdcard/telegram_local_storage.db
 echo.
 
 REM 4. Pull database from device to project root
@@ -86,7 +86,7 @@ echo --------------------------------------------
 
 REM Get project root directory (parent of script directory)
 cd /d "%~dp0.."
-set TARGET_PATH=%CD%\youdu_messages.db
+set TARGET_PATH=%CD%\telegram_local_storage.db
 
 echo    Target path: %TARGET_PATH%
 
@@ -94,14 +94,14 @@ REM Backup if target file already exists
 if exist "%TARGET_PATH%" (
     set TIMESTAMP=%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%
     set TIMESTAMP=!TIMESTAMP: =0!
-    set BACKUP_PATH=%CD%\youdu_messages.db.backup_!TIMESTAMP!
+    set BACKUP_PATH=%CD%\telegram_local_storage.db.backup_!TIMESTAMP!
     echo    [INFO] Found existing database file, backing up to:
     echo           !BACKUP_PATH!
     move /y "%TARGET_PATH%" "!BACKUP_PATH!" >nul
 )
 
 REM Pull database
-adb pull /sdcard/youdu_messages.db . >nul 2>&1
+adb pull /sdcard/telegram_local_storage.db . >nul 2>&1
 if errorlevel 1 (
     echo    [ERROR] Database download failed
     exit /b 1
@@ -122,7 +122,7 @@ echo.
 
 REM 5. Clean up temporary file on device
 echo Cleaning up temporary files...
-adb shell rm /sdcard/youdu_messages.db >nul 2>&1
+adb shell rm /sdcard/telegram_local_storage.db >nul 2>&1
 echo    [OK] Temporary files cleaned
 echo.
 

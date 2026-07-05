@@ -39,8 +39,8 @@ class BackgroundServiceManager {
         autoStart: true,
         autoStartOnBoot: true,
         isForegroundMode: true,
-        notificationChannelId: 'youdu_background_service',
-        initialNotificationTitle: '有度',
+        notificationChannelId: 'telegram_background_service',
+        initialNotificationTitle: 'Telegram',
         initialNotificationContent: '保持消息连接中...',
         foregroundServiceNotificationId: 888,
       ),
@@ -78,21 +78,21 @@ class BackgroundServiceManager {
   }
 
   /// 处理检查连接请求 - 检测到断开时触发重连
+  /// 🔴 统一走 ensureConnected()：已连接/正在连接/重连循环运行中时不会新开连接，
+  /// 避免watchdog与心跳失败重连、生命周期resumed重连并发建立多条连接互踢
   Future<void> _handleCheckConnection() async {
     final wsService = WebSocketService();
-    final isConnected = wsService.isConnected;
 
     // 更新后台服务的连接状态显示
-    _service.invoke('updateStatus', {'connected': isConnected});
+    _service.invoke('updateStatus', {'connected': wsService.isConnected});
 
-    // 🔴 如果断开连接，触发强制重连
-    if (!isConnected) {
-      logger.debug('🔄 [后台服务] 检测到WebSocket断开，触发强制重连...');
-      final success = await wsService.forceReconnect();
+    if (!wsService.isConnected) {
+      logger.debug('🔄 [后台服务] 检测到WebSocket断开，确保重连...');
+      final success = await wsService.ensureConnected();
       if (success) {
-        logger.debug('✅ [后台服务] 强制重连成功');
+        logger.debug('✅ [后台服务] 重连成功');
       } else {
-        logger.debug('⚠️ [后台服务] 强制重连失败，将在下次检查时重试');
+        logger.debug('⚠️ [后台服务] 重连未完成（可能重连循环正在运行），下次检查时再试');
       }
     }
   }
@@ -148,8 +148,11 @@ void onStart(ServiceInstance service) async {
     }
   });
 
-  // 定期检查连接状态（每5秒检查一次，减少频率）
-  Timer.periodic(const Duration(seconds: 5), (timer) async {
+  // 定期检查连接状态（每30秒检查一次）
+  // 🔴 5秒太激进：主isolate的重连循环最长要跑几十秒，watchdog高频插入
+  // forceReconnect 会与其并发建连，造成服务器互踢风暴；且后台isolate
+  // 被系统冻结时Timer本来就不跑，高频检查只在前台徒增开销
+  Timer.periodic(const Duration(seconds: 30), (timer) async {
     heartbeatCount++;
     logger.debug('📱 [后台服务] 💓 心跳 #$heartbeatCount - 时间: ${DateTime.now()}');
     
@@ -161,7 +164,7 @@ void onStart(ServiceInstance service) async {
       if (await service.isForegroundService()) {
         final status = isConnected ? '已连接' : '正在连接...';
         service.setForegroundNotificationInfo(
-          title: '有度',
+          title: 'Telegram',
           content: '消息服务$status (心跳#$heartbeatCount)',
         );
         logger.debug('📱 [后台服务] 通知已更新: $status');

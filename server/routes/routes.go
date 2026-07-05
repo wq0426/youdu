@@ -2,16 +2,16 @@ package routes
 
 import (
 	"database/sql"
-	"youdu-server/controllers"
-	"youdu-server/middleware"
-	ws "youdu-server/websocket"
+	"telegram-server/controllers"
+	"telegram-server/middleware"
+	ws "telegram-server/websocket"
 
 	"github.com/gin-gonic/gin"
 )
 
 // SetupRouter 设置路由
 // 返回 gin.Engine 和 CallController（用于 WebSocket 路由）
-func SetupRouter(hub *ws.Hub, youduDB *sql.DB) (*gin.Engine, *controllers.CallController) {
+func SetupRouter(hub *ws.Hub, telegramDB *sql.DB) (*gin.Engine, *controllers.CallController) {
 	// 使用 gin.New() 而不是 gin.Default()，以便使用自定义日志中间件
 	router := gin.New()
 
@@ -40,9 +40,11 @@ func SetupRouter(hub *ws.Hub, youduDB *sql.DB) (*gin.Engine, *controllers.CallCo
 	deviceCtrl := controllers.NewDeviceController()
 	appVersionCtrl := controllers.NewAppVersionController()
 	scheduledMsgCtrl := controllers.NewScheduledMessageController()
-	
+	chatCtrl := controllers.NewChatController()
+	messageSyncCtrl := controllers.NewMessageSyncController()
+
 	// 设置OSSController的数据库连接
-	ossCtrl.SetDB(youduDB)
+	ossCtrl.SetDB(telegramDB)
 
 	// 🔴 设置 MessageController 的 CallCtrl 引用，用于清理群组通话状态
 	messageCtrl.CallCtrl = callCtrl
@@ -144,21 +146,20 @@ func SetupRouter(hub *ws.Hub, youduDB *sql.DB) (*gin.Engine, *controllers.CallCo
 				user.GET("/:id", userCtrl.GetUserByID)                           // 根据ID查询用户信息（动态路由放最后）
 			}
 
-			// 消息相关路由
-			message := authorized.Group("/messages")
+			// 🔵 阶段6：原 /messages 路由组已整组移除——消息收发/历史/已读/撤回/删除 HTTP 接口
+			// 全部迁移到 Agora Chat，离线同步记账接口（/clear-synced）随离线投递下线删除，handler 均已删除。
+
+			// Agora Chat（即时通讯）鉴权：下发 chat 登录 token（客户端 AgoraChatService 登录所必需）
+			chat := authorized.Group("/chat")
 			{
-				message.GET("/conversations", messageCtrl.GetConversations)                   // 获取会话列表
-				message.GET("/history/:user_id", messageCtrl.GetMessageHistory)               // 获取与指定用户的消息历史
-				message.GET("/recent-contacts", messageCtrl.GetRecentContacts)                // 获取最近30个联系人列表
-				message.GET("/conversation/:contact_id", messageCtrl.GetConversationMessages) // 查询联系人的对话记录（分页）
-				message.POST("/by-ids", messageCtrl.GetMessagesByIds)                        // 根据消息ID列表获取私聊消息（用于同步缺失消息）
-				message.POST("/mark-read", messageCtrl.MarkMessagesAsRead)                    // 标记私聊消息为已读
-				message.POST("/mark-group-read", messageCtrl.MarkGroupMessagesAsRead)         // 标记群组消息为已读
-				message.POST("/mark-all-read", messageCtrl.MarkAllMessagesAsRead)             // 一键标记所有消息为已读
-				message.POST("/recall", messageCtrl.RecallMessage)                            // 撤回消息
-				message.DELETE("/:id", messageCtrl.DeleteMessage)                             // 删除消息
-				message.POST("/batch-delete", messageCtrl.BatchDeleteMessages)                // 批量删除消息
-				message.POST("/clear-synced", messageCtrl.ClearSyncedRecords)                 // 清除消息同步记录（用于重新安装后重新同步）
+				chat.GET("/token", chatCtrl.GetChatToken) // 获取当前用户的 Agora Chat appKey + username + token
+			}
+
+			// 消息同步归档：接收方客户端收到 Agora 消息后异步上报，供管理后台展示/搜索聊天记录
+			messageSync := authorized.Group("/message-sync")
+			{
+				messageSync.POST("/batch", messageSyncCtrl.SyncBatch)   // 批量归档收到的单聊/群聊消息（幂等）
+				messageSync.POST("/recall", messageSyncCtrl.SyncRecall) // 消息撤回时标记归档记录为 recalled
 			}
 
 			// 联系人相关路由
@@ -179,9 +180,9 @@ func SetupRouter(hub *ws.Hub, youduDB *sql.DB) (*gin.Engine, *controllers.CallCo
 			// 收藏相关路由
 			favorite := authorized.Group("/favorites")
 			{
-				favorite.POST("/batch", favoriteCtrl.CreateBatchFavorite)   // 批量创建收藏（合并模式）- 必须在通用路由之前
+				// 🔵 阶段6：收藏改为客户端传内容快照（/direct），不再按 message_id 读 messages/group_messages。
+				// 旧的 POST /batch（CreateBatchFavorite）与 POST ""（CreateFavorite）已删除。
 				favorite.POST("/direct", favoriteCtrl.CreateDirectFavorite) // 直接创建收藏（不需要message_id）
-				favorite.POST("", favoriteCtrl.CreateFavorite)              // 创建收藏
 				favorite.GET("", favoriteCtrl.GetFavorites)                 // 获取收藏列表（分页）
 				favorite.DELETE("/:id", favoriteCtrl.DeleteFavorite)        // 删除收藏
 			}
@@ -214,9 +215,8 @@ func SetupRouter(hub *ws.Hub, youduDB *sql.DB) (*gin.Engine, *controllers.CallCo
 				group.DELETE("/:id", groupCtrl.DeleteGroup)                                          // 删除群组（解散群组）
 				group.POST("/:id/join", groupCtrl.JoinGroup)                                         // 加入群组
 				group.POST("/:id/leave", groupCtrl.LeaveGroup)                                       // 退出群组
-				group.GET("/:id/messages", groupCtrl.GetGroupMessages)                               // 获取群组消息列表
-				group.POST("/:id/messages/by-ids", groupCtrl.GetGroupMessagesByIds)                  // 根据消息ID列表获取群组消息（用于同步缺失消息）
-				group.POST("/messages", groupCtrl.CreateGroupMessage)                                // 发送群组消息
+				// 🔵 阶段6：群消息收发/历史 HTTP 接口已迁移到 Agora Chat，客户端不再调用，
+				// 对应 handler 已删除（GetGroupMessages/GetGroupMessagesByIds/CreateGroupMessage）。
 				group.POST("/:id/mute", groupCtrl.MuteGroupMember)                                   // 禁言群组成员
 				group.POST("/:id/unmute", groupCtrl.UnmuteGroupMember)                               // 解除群组成员禁言
 				group.POST("/:id/transfer", groupCtrl.TransferOwnership)                             // 转让群主权限

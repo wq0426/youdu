@@ -44,7 +44,7 @@ if grep -q "系统管理员" server/db/init.sql; then
     echo "  用户名: admin"
     echo "  密码: wq123123"
     echo "  邀请码: 666666"
-    echo "  邮箱: admin@youdu.com"
+    echo "  邮箱: admin@xbdchat.cc"
 else
     echo "❌ 错误: 未找到管理员账号"
     exit 1

@@ -1,7 +1,7 @@
 {
-  "name": "youdu-admin",
+  "name": "telegram-admin",
   "version": "1.0.0",
-  "description": "YouDu Admin Dashboard",
+  "description": "Telegram Admin Dashboard",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn src/index.ts",

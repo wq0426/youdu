@@ -1,10 +1,10 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:youdu/utils/storage.dart';
-import 'package:youdu/services/api_service.dart';
-import 'package:youdu/services/websocket_service.dart';
-import 'package:youdu/utils/app_localizations.dart';
+import 'package:telegram/utils/storage.dart';
+import 'package:telegram/services/api_service.dart';
+import 'package:telegram/services/websocket_service.dart';
+import 'package:telegram/utils/app_localizations.dart';
 import 'user_info_dialog.dart';
 import 'change_password_dialog.dart';
 import 'customer_service_dialog.dart';
@@ -564,7 +564,7 @@ class _UserProfileMenuState extends State<UserProfileMenu> {
         ),
         _buildMenuItem(
           icon: Icons.exit_to_app,
-          title: l10n.translate('exit_youdu'),
+          title: l10n.translate('exit_telegram'),
           onTap: () {
             // 不要先关闭菜单，直接显示确认对话
             _showLogoutDialog(context);
@@ -899,7 +899,7 @@ class _UserProfileMenuState extends State<UserProfileMenu> {
     showDialog(
       context: menuContext,
       builder: (dialogContext) => AlertDialog(
-        title: Text(l10n.translate('exit_youdu_title')),
+        title: Text(l10n.translate('exit_telegram_title')),
         content: Text(l10n.translate('confirm_logout')),
         actions: [
           TextButton(
@@ -961,7 +961,7 @@ class _UserProfileMenuState extends State<UserProfileMenu> {
               }
 
               // 关闭应用
-              logger.info('🚪 退出有度，退出应用');
+              logger.info('🚪 退出Telegram，退出应用');
               if (Platform.isAndroid || Platform.isIOS) {
                 // 移动平台：使用 SystemNavigator.pop()
                 SystemNavigator.pop();

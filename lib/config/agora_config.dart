@@ -18,4 +18,14 @@ class AgoraConfig {
 
   /// 是否已配置 App ID
   static bool get isConfigured => appId.isNotEmpty;
+
+  /// 声网 Agora Chat（即时通讯）AppKey，格式 orgName#appName
+  /// ⚠️ 需在 Agora 控制台为项目开通「即时通讯」后获取并填充。
+  /// 注意：这是 Chat 专用 AppKey，区别于上面 RTC 用的 App ID。
+  /// 兜底也会从后端 /api/chat/token 返回的 app_key 动态获取（见 AgoraChatService）。
+  static const String chatAppKey =
+      String.fromEnvironment('AGORA_CHAT_APP_KEY', defaultValue: '41200041982#200059092');
+
+  /// 是否已配置 Chat AppKey
+  static bool get isChatConfigured => chatAppKey.isNotEmpty;
 }

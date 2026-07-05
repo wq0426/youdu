@@ -9,7 +9,7 @@ class NativeMessageService {
   factory NativeMessageService() => _instance;
   NativeMessageService._internal();
 
-  static const MethodChannel _channel = MethodChannel('com.example.youdu/message');
+  static const MethodChannel _channel = MethodChannel('com.example.telegram/message');
 
   /// 点击消息弹窗的回调
   Function(Map<String, dynamic> messageData)? onMessageTapped;

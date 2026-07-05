@@ -98,8 +98,8 @@ Write-Host "  迁移完成！" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "下一步:" -ForegroundColor Green
-Write-Host "1. 重新编译服务器: go build -o youdu_server.exe main.go" -ForegroundColor White
-Write-Host "2. 运行服务器: ./youdu_server.exe" -ForegroundColor White
+Write-Host "1. 重新编译服务器: go build -o telegram-server.exe main.go" -ForegroundColor White
+Write-Host "2. 运行服务器: ./telegram-server.exe" -ForegroundColor White
 Write-Host "3. 测试群消息删除功能" -ForegroundColor White
 Write-Host ""
 

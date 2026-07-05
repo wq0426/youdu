@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"youdu-server/config"
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/services"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/config"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/services"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 
 	"github.com/gin-gonic/gin"
 )
@@ -43,6 +43,12 @@ type CallController struct {
 	// 🔴 新增：群组ID到通话信息的映射 - key: groupID, value: 通话信息
 	// 用于查询某个群组是否有正在进行的通话
 	groupIDToCallInfo map[int]*GroupCallInfo
+	// 🔴 迁移 Agora Chat：群通话系统消息（"XX发起了通话"/"加入通话"按钮）不再写 group_messages 表，
+	// 改为内存构造 + WebSocket 实时广播（临时消息，不持久化）。
+	// sysMsgSeq 为这些临时消息生成不与 Agora 派生ID冲突的合成ID（基址 3e9，高于 Agora stableId 范围 [0,2^31)）。
+	sysMsgSeq int64
+	// buttonMsgIDs 记录每个频道"加入通话"按钮消息的合成ID - key: channelName，用于通话结束后广播删除该按钮。
+	buttonMsgIDs map[string]int64
 	// 保护 groupCallMembers 的互斥锁
 	groupCallMutex sync.RWMutex
 }
@@ -58,6 +64,7 @@ func NewCallController(hub *ws.Hub) *CallController {
 		groupCallConnectedMembers: make(map[string][]int),
 		groupCallStartTime:        make(map[string]int64),
 		groupIDToCallInfo:         make(map[int]*GroupCallInfo),
+		buttonMsgIDs:              make(map[string]int64),
 	}
 }
 
@@ -246,6 +253,26 @@ func (cc *CallController) InitiateCall(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// mirrorSignalToCmd 把一条通话信令（与 WS 推送相同的 notification）通过 Agora Chat CMD 消息
+// 并行发送（双通道过渡期，最终替代 WS）。复用 WS 用的同一个 notification map，字段自动同步：
+// 丢弃 "type"，其值改放 ext["signal"]；其余字段转字符串放 ext。best-effort，失败仅记日志不阻塞。
+func (cc *CallController) mirrorSignalToCmd(fromID, toID int, notification map[string]interface{}) {
+	signal, _ := notification["type"].(string)
+	if signal == "" {
+		return
+	}
+	ext := map[string]interface{}{"signal": signal}
+	for k, v := range notification {
+		if k == "type" {
+			continue
+		}
+		ext[k] = fmt.Sprintf("%v", v)
+	}
+	if err := services.AgoraChatGroup.SendCmd(fromID, toID, "call_signal", ext); err != nil {
+		utils.LogDebug("⚠️ [通话] CMD 信令代发失败 signal=%s to=%d: %v", signal, toID, err)
+	}
+}
+
 // notifyIncomingCall 通知被叫方有来电
 func (cc *CallController) notifyIncomingCall(calleeID int, channelName, token string, callerID int, callerUsername, callerDisplayName, callType string) {
 	// 检查被叫方是否在线
@@ -275,6 +302,8 @@ func (cc *CallController) notifyIncomingCall(calleeID int, channelName, token st
 
 	// 通过 WebSocket 发送通知
 	cc.Hub.SendToUser(calleeID, message)
+	// 双通道并行：同一信令再经 Agora Chat CMD 发一份（客户端按 key 去重）
+	cc.mirrorSignalToCmd(callerID, calleeID, notification)
 
 	utils.LogDebug("✅ [通话] 来电通知已发送给用户 %d", calleeID)
 }
@@ -1058,6 +1087,8 @@ func (cc *CallController) notifyCallRejected(callerID int, channelName string, c
 
 	// 通过 WebSocket 发送通知
 	cc.Hub.SendToUser(callerID, message)
+	// 双通道并行：拒绝方(calleeID) → 主叫方(callerID)
+	cc.mirrorSignalToCmd(calleeID, callerID, notification)
 
 	utils.LogDebug("✅ [通话] 拒绝通知已发送给用户 %d", callerID)
 }
@@ -1129,6 +1160,8 @@ func (cc *CallController) notifyCallEnded(peerID int, channelName string, userID
 
 	// 通过 WebSocket 发送通知
 	cc.Hub.SendToUser(peerID, message)
+	// 双通道并行：结束方(userID) → 对方(peerID)
+	cc.mirrorSignalToCmd(userID, peerID, notification)
 
 	utils.LogDebug("✅ [通话] 结束通知已发送给用户 %d", peerID)
 }
@@ -1431,6 +1464,11 @@ func (cc *CallController) LeaveGroupCall(c *gin.Context) {
 		go cc.notifyGroupCallMemberLeft(req.ChannelName, leavingUserID, leavingUser.Username, leavingUser.FullName, remainingMembers)
 	}
 
+	// 🔴 通话结束系统消息内容/类型：经 WS 广播（不落库），同时随响应返回，
+	// 由最后离开的客户端补发一条 Agora 群消息承担持久化（与"XX发起了语音通话"同一方案）
+	endMessage := ""
+	endMessageType := ""
+
 	// 🔴 当通话结束时（没有已连接成员或只剩一个），移除"加入通话"按钮
 	if isCallEnded && req.GroupID != nil && *req.GroupID > 0 {
 		utils.LogDebug("📞 [LeaveGroupCall] 通话结束，准备清理资源")
@@ -1477,6 +1515,9 @@ func (cc *CallController) LeaveGroupCall(c *gin.Context) {
 		}
 		utils.LogDebug("📞 [LeaveGroupCall] 消息类型: %s", messageType)
 
+		endMessage = systemMessage
+		endMessageType = messageType
+
 		// 异步发送系统消息到群组
 		go func() {
 			err := cc.sendSystemMessageToGroup(*req.GroupID, leavingUserID, systemMessage, messageType, req.CallType, req.ChannelName)
@@ -1508,7 +1549,9 @@ func (cc *CallController) LeaveGroupCall(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "已离开群组通话",
 		"data": gin.H{
-			"is_call_ended": isCallEnded,
+			"is_call_ended":    isCallEnded,
+			"end_message":      endMessage,     // "通话时长 MM:SS" 或 "发起人已取消"，供客户端补发 Agora 持久化副本
+			"end_message_type": endMessageType, // call_ended / call_ended_video
 		},
 	})
 }
@@ -1768,36 +1811,36 @@ func (cc *CallController) notifyGroupCallEnded(channelName string, memberIDs []i
 	utils.LogDebug("✅ [群组通话] 通话结束通知已发送，频道: %s, 通知成员: %v", channelName, memberIDs)
 }
 
-// sendSystemMessageToGroup 向群组发送系统消息
+// nextSystemMsgID 为群通话临时系统消息生成合成ID。
+// 基址 3e9 高于 Agora stableId 范围 [0, 2^31)，避免与正常 Agora 消息的列表key冲突；
+// 小于 2^53 以保证 JSON 数字精度安全。
+func (cc *CallController) nextSystemMsgID() int64 {
+	cc.groupCallMutex.Lock()
+	defer cc.groupCallMutex.Unlock()
+	cc.sysMsgSeq++
+	return 3000000000 + cc.sysMsgSeq
+}
+
+// sendSystemMessageToGroup 向群组发送系统消息（通话发起/加入按钮等）
+//
+// 迁移到 Agora Chat：这类群通话系统消息不再写入 group_messages 表（该表即将下线），
+// 改为内存构造 + WebSocket 实时广播（临时消息，不持久化）。客户端按 message_type 渲染为通话提示/按钮。
+// "加入通话"按钮消息的合成ID会被记录到 buttonMsgIDs[channelName]，供通话结束后 removeJoinCallButtonMessage 广播删除。
 func (cc *CallController) sendSystemMessageToGroup(groupID, senderID int, content, messageType, callType, channelName string) error {
 	// 🔍 调试日志：显示接收到的参数
 	utils.LogDebug("🔍 [sendSystemMessageToGroup] groupID: %d, messageType: %s, callType: '%s', channelName: '%s'", groupID, messageType, callType, channelName)
 
-	// 1. 将消息保存到数据库（包含call_type和channel_name字段）
-	query := `
-		INSERT INTO group_messages (group_id, sender_id, sender_name, content, message_type, call_type, channel_name, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, group_id, sender_id, sender_name, content, message_type, created_at, call_type, channel_name
-	`
-
-	// 获取发送者信息
-	// 优先使用群昵称（群昵称 > 全名 > 用户名），获取失败时回退到 users 表
+	// 获取发送者显示名称：优先群昵称（群昵称 > 全名 > 用户名），获取失败时回退到 users 表
 	var senderName string
-
-	// 如果在群组中，优先从 group_members + users 获取显示名称
 	if groupID > 0 && cc.groupRepo != nil {
 		if name, err := cc.groupRepo.GetGroupMemberNickname(groupID, senderID); err == nil && name != "" {
 			senderName = name
 		}
 	}
-
-	// 回退：直接从 users 表获取 full_name / username
 	if senderName == "" {
 		var username string
 		var senderFullName sql.NullString
-		var err error
-		err = db.DB.QueryRow("SELECT username, full_name FROM users WHERE id = $1", senderID).Scan(&username, &senderFullName)
-		if err != nil {
+		if err := db.DB.QueryRow("SELECT username, full_name FROM users WHERE id = $1", senderID).Scan(&username, &senderFullName); err != nil {
 			return fmt.Errorf("获取发送者信息失败: %v", err)
 		}
 		if senderFullName.Valid && senderFullName.String != "" {
@@ -1807,27 +1850,15 @@ func (cc *CallController) sendSystemMessageToGroup(groupID, senderID int, conten
 		}
 	}
 
-	var msg struct {
-		ID          int
-		GroupID     int
-		SenderID    int
-		SenderName  string
-		Content     string
-		MessageType string
-		CreatedAt   time.Time
-		CallType    sql.NullString
-		ChannelName sql.NullString
+	// 生成合成消息ID；若为"加入通话"按钮，记录以便通话结束后删除
+	msgID := cc.nextSystemMsgID()
+	if (messageType == "join_voice_button" || messageType == "join_video_button") && channelName != "" {
+		cc.groupCallMutex.Lock()
+		cc.buttonMsgIDs[channelName] = msgID
+		cc.groupCallMutex.Unlock()
 	}
 
-	// 🔴 使用 UTC 时间，因为数据库字段是 timestamp without time zone
-	err := db.DB.QueryRow(query, groupID, senderID, senderName, content, messageType, callType, channelName, time.Now().UTC()).Scan(
-		&msg.ID, &msg.GroupID, &msg.SenderID, &msg.SenderName, &msg.Content, &msg.MessageType, &msg.CreatedAt, &msg.CallType, &msg.ChannelName,
-	)
-	if err != nil {
-		return fmt.Errorf("保存系统消息失败: %v", err)
-	}
-
-	// 2. 获取群组所有成员
+	// 获取群组所有成员
 	memberRows, err := db.DB.Query(`
 		SELECT user_id FROM group_members WHERE group_id = $1
 	`, groupID)
@@ -1845,54 +1876,44 @@ func (cc *CallController) sendSystemMessageToGroup(groupID, senderID int, conten
 		memberIDs = append(memberIDs, memberID)
 	}
 
-	// 3. 构造消息通知（使用数据库返回的值确保一致性）
+	// 构造消息通知（内存构造，保持与原 group_message 帧一致的契约）
 	notificationData := map[string]interface{}{
-		"id":           msg.ID,
-		"group_id":     msg.GroupID,
-		"sender_id":    msg.SenderID,
-		"sender_name":  msg.SenderName,
-		"content":      msg.Content,
-		"message_type": msg.MessageType,
-		"is_read":      false, // 新消息默认未读
-		"created_at":   msg.CreatedAt.UTC(), // 🔴 确保使用 UTC 时间
+		"id":           msgID,
+		"group_id":     groupID,
+		"sender_id":    senderID,
+		"sender_name":  senderName,
+		"content":      content,
+		"message_type": messageType,
+		"is_read":      false,
+		"created_at":   time.Now().UTC(),
 	}
-
 	// 只有当callType和channelName不为空时才添加（避免发送null值）
-	if msg.CallType.Valid && msg.CallType.String != "" {
-		notificationData["call_type"] = msg.CallType.String
+	if callType != "" {
+		notificationData["call_type"] = callType
 	}
-	if msg.ChannelName.Valid && msg.ChannelName.String != "" {
-		notificationData["channel_name"] = msg.ChannelName.String
+	if channelName != "" {
+		notificationData["channel_name"] = channelName
 	}
 
 	notification := map[string]interface{}{
 		"type":     "group_message",
 		"data":     notificationData,
-		"group_id": msg.GroupID, // 添加 group_id 到外层
+		"group_id": groupID,
 	}
 
-	// 🔍 调试日志：显示notification的data内容
-	utils.LogDebug("🔍 [sendSystemMessageToGroup] notification.data包含的字段: %+v", notificationData)
-
-	// 序列化消息
 	messageBytes, err := json.Marshal(notification)
 	if err != nil {
 		return fmt.Errorf("序列化消息失败: %v", err)
 	}
 
-	// 🔍 调试日志：显示实际发送的JSON
 	utils.LogDebug("🔍 [sendSystemMessageToGroup] 发送的JSON: %s", string(messageBytes))
 
-	// 4. 向所有在线成员广播消息
+	// 向所有在线成员广播消息
 	for _, memberID := range memberIDs {
 		cc.Hub.SendToUser(memberID, messageBytes)
 	}
 
-	// 🔴 注意：不再发送额外的 group_call_notification 通知
-	// 因为 group_message 已经包含了所有必要的信息（message_type, call_type, channel_name）
-	// 客户端会根据 message_type 来判断是否显示为按钮
-
-	utils.LogDebug("✅ [群组通话] 系统消息已广播到 %d 个群组成员", len(memberIDs))
+	utils.LogDebug("✅ [群组通话] 系统消息已广播到 %d 个群组成员（临时消息，未持久化）", len(memberIDs))
 	return nil
 }
 
@@ -1900,39 +1921,20 @@ func (cc *CallController) sendSystemMessageToGroup(groupID, senderID int, conten
 // 🔴 修改：直接删除按钮消息，而不是更新消息类型
 // 因为"XX发起了语音通话"已经是单独的消息，按钮消息可以直接删除
 func (cc *CallController) removeJoinCallButtonMessage(groupID int, channelName string) {
-	// 先查询要删除的消息ID
-	var deletedMessageID int
-	querySelect := `
-		SELECT id FROM group_messages 
-		WHERE group_id = $1 
-		AND (message_type = 'join_voice_button' OR message_type = 'join_video_button')
-		AND channel_name = $2
-		LIMIT 1
-	`
-	err := db.DB.QueryRow(querySelect, groupID, channelName).Scan(&deletedMessageID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			utils.LogDebug("⚠️ [群组通话] 未找到需要删除的加入通话按钮消息 - GroupID: %d, ChannelName: %s", groupID, channelName)
-		} else {
-			utils.LogDebug("❌ [群组通话] 查询加入通话按钮消息失败: %v", err)
-		}
+	// 迁移到 Agora Chat：按钮消息不再持久化到 group_messages，改用内存记录的合成ID定位。
+	cc.groupCallMutex.Lock()
+	deletedMessageID, ok := cc.buttonMsgIDs[channelName]
+	if ok {
+		delete(cc.buttonMsgIDs, channelName)
+	}
+	cc.groupCallMutex.Unlock()
+
+	if !ok {
+		utils.LogDebug("⚠️ [群组通话] 未找到需要删除的加入通话按钮消息 - GroupID: %d, ChannelName: %s", groupID, channelName)
 		return
 	}
 
-	// 删除按钮消息
-	queryDelete := `
-		DELETE FROM group_messages 
-		WHERE group_id = $1 
-		AND (message_type = 'join_voice_button' OR message_type = 'join_video_button')
-		AND channel_name = $2
-	`
-	_, err = db.DB.Exec(queryDelete, groupID, channelName)
-	if err != nil {
-		utils.LogDebug("❌ [群组通话] 删除加入通话按钮消息失败: %v", err)
-		return
-	}
-
-	utils.LogDebug("✅ [群组通话] 已删除按钮消息 - MessageID: %d, GroupID: %d, ChannelName: %s", deletedMessageID, groupID, channelName)
+	utils.LogDebug("✅ [群组通话] 准备广播删除按钮消息 - MessageID: %d, GroupID: %d, ChannelName: %s", deletedMessageID, groupID, channelName)
 
 	// 获取群组所有成员
 	memberRows, err := db.DB.Query(`

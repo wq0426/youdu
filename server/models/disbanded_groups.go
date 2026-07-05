@@ -2,8 +2,8 @@ package models
 
 import (
 	"sync"
-	"youdu-server/db"
-	"youdu-server/utils"
+	"telegram-server/db"
+	"telegram-server/utils"
 )
 
 // DisbandedGroupsManager 已解散群组管理器

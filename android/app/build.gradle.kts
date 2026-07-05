@@ -14,7 +14,7 @@ keystorePropertiesFile.inputStream().use {
 }
 
 android {
-    namespace = "com.example.youdu"
+    namespace = "com.example.telegram"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 

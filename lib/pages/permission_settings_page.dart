@@ -20,7 +20,7 @@ class _PermissionSettingsPageState extends State<PermissionSettingsPage>
   // 🔴 后台活动状态（电池优化）
   bool _isIgnoringBatteryOptimizations = false;
   bool _batteryOptimizationLoading = false;
-  static const MethodChannel _notificationChannel = MethodChannel('com.example.youdu/notification');
+  static const MethodChannel _notificationChannel = MethodChannel('com.example.telegram/notification');
 
   final List<PermissionItem> _permissions = [
     PermissionItem(
@@ -114,7 +114,7 @@ class _PermissionSettingsPageState extends State<PermissionSettingsPage>
               SizedBox(height: 8),
               Text('2. 进入"电池"', style: TextStyle(fontSize: 14)),
               SizedBox(height: 8),
-              Text('3. 找到"有度"应用，点击进入"应用耗电详情"', style: TextStyle(fontSize: 14)),
+              Text('3. 找到"Telegram"应用，点击进入"应用耗电详情"', style: TextStyle(fontSize: 14)),
               SizedBox(height: 8),
               Text('4. 开启"允许后台活动"', style: TextStyle(fontSize: 14)),
             ],
@@ -404,7 +404,7 @@ class _PermissionSettingsPageState extends State<PermissionSettingsPage>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'youdu',
+                      'Telegram',
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w500,

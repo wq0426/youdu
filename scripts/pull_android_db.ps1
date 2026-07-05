@@ -57,14 +57,14 @@ Write-Host ""
 # 3. Copy database from device to sdcard
 Write-Host "Step 3/4: Copy Database to SD Card" -ForegroundColor Yellow
 Write-Host "--------------------------------------------"
-Write-Host "   Database path: /data/data/com.example.youdu/databases/youdu_messages.db" -ForegroundColor Gray
+Write-Host "   Database path: /data/data/com.zhima.youdu.cn/databases/telegram_local_storage.db" -ForegroundColor Gray
 
 # Execute copy command (requires root)
-$copyCommand = "su -c 'cp /data/data/com.example.youdu/databases/youdu_messages.db /sdcard/'"
+$copyCommand = "su -c 'cp /data/data/com.zhima.youdu.cn/databases/telegram_local_storage.db /sdcard/'"
 $result = adb shell $copyCommand 2>&1
 
 # Check if copy succeeded
-$checkCommand = "ls /sdcard/youdu_messages.db"
+$checkCommand = "ls /sdcard/telegram_local_storage.db"
 $checkResult = adb shell $checkCommand 2>&1
 
 if ($checkResult -match "No such file") {
@@ -78,11 +78,11 @@ if ($checkResult -match "No such file") {
     Write-Host "Please manually execute following commands to troubleshoot:" -ForegroundColor Cyan
     Write-Host "   adb shell" -ForegroundColor Gray
     Write-Host "   su" -ForegroundColor Gray
-    Write-Host "   ls /data/data/com.example.youdu/databases/" -ForegroundColor Gray
+    Write-Host "   ls /data/data/com.zhima.youdu.cn/databases/" -ForegroundColor Gray
     exit 1
 }
 
-Write-Host "   [OK] Database copied to /sdcard/youdu_messages.db" -ForegroundColor Green
+Write-Host "   [OK] Database copied to /sdcard/telegram_local_storage.db" -ForegroundColor Green
 Write-Host ""
 
 # 4. Pull database from device to project root
@@ -91,14 +91,14 @@ Write-Host "--------------------------------------------"
 
 # Get project root directory (parent of script directory)
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$targetPath = Join-Path $projectRoot "youdu_messages.db"
+$targetPath = Join-Path $projectRoot "telegram_local_storage.db"
 
 Write-Host "   Target path: $targetPath" -ForegroundColor Gray
 
 # Backup if target file already exists
 if (Test-Path $targetPath) {
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $backupPath = Join-Path $projectRoot "youdu_messages.db.backup_$timestamp"
+    $backupPath = Join-Path $projectRoot "telegram_local_storage.db.backup_$timestamp"
     Write-Host "   [INFO] Found existing database file, backing up to:" -ForegroundColor Yellow
     Write-Host "          $backupPath" -ForegroundColor Gray
     Move-Item -Path $targetPath -Destination $backupPath -Force
@@ -106,7 +106,7 @@ if (Test-Path $targetPath) {
 
 # Pull database
 Set-Location $projectRoot
-$pullResult = adb pull /sdcard/youdu_messages.db . 2>&1
+$pullResult = adb pull /sdcard/telegram_local_storage.db . 2>&1
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "   [ERROR] Database download failed" -ForegroundColor Red
@@ -129,7 +129,7 @@ Write-Host ""
 
 # 5. Clean up temporary file on device (optional)
 Write-Host "Cleaning up temporary files..." -ForegroundColor Yellow
-adb shell rm /sdcard/youdu_messages.db 2>&1 | Out-Null
+adb shell rm /sdcard/telegram_local_storage.db 2>&1 | Out-Null
 Write-Host "   [OK] Temporary files cleaned" -ForegroundColor Green
 Write-Host ""
 

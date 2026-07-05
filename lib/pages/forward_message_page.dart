@@ -3,9 +3,10 @@ import '../models/message_model.dart';
 import '../models/contact_model.dart';
 import '../models/group_model.dart';
 import '../services/api_service.dart';
-import '../services/websocket_service.dart';
+import '../services/agora_chat_service.dart';
 import '../utils/logger.dart';
 import '../utils/storage.dart';
+import 'mobile_home_page.dart';
 
 /// 转发消息页面 - 用于选择转发目标
 class ForwardMessagePage extends StatefulWidget {
@@ -20,7 +21,6 @@ class ForwardMessagePage extends StatefulWidget {
 class _ForwardMessagePageState extends State<ForwardMessagePage> {
   // 控制器
   final TextEditingController _searchController = TextEditingController();
-  final WebSocketService _wsService = WebSocketService();
 
   // 数据列表
   List<ContactModel> _contacts = [];
@@ -68,8 +68,12 @@ class _ForwardMessagePageState extends State<ForwardMessagePage> {
         setState(() {
           if (contactsResponse['code'] == 0 &&
               contactsResponse['data'] != null) {
-            _contacts = (contactsResponse['data'] as List)
-                .map((json) => ContactModel.fromJson(json))
+            // getContacts 返回 { code, data: { contacts: [...], total } }
+            final contactsData =
+                (contactsResponse['data']['contacts'] as List?) ?? const [];
+            _contacts = contactsData
+                .map((json) => ContactModel.fromJson(json as Map<String, dynamic>))
+                .where((c) => c.isApproved && !c.isDeleted)
                 .toList();
           }
 
@@ -135,32 +139,95 @@ class _ForwardMessagePageState extends State<ForwardMessagePage> {
       int successCount = 0;
       int totalCount = _selectedTargets.length;
 
+      // 发送者信息（用于 ext 透传，接收端还原昵称/头像）
+      final userName = await Storage.getUsername() ?? '';
+      final userAvatar = await Storage.getAvatar() ?? '';
+      final userFullName = await Storage.getFullName() ?? '';
+      final msgType = widget.message.messageType;
+      final content = widget.message.content;
+      final fileName = widget.message.fileName;
+      final isTextLike = msgType == 'text' || msgType == 'quoted';
+
       for (final target in _selectedTargets) {
         final isGroup = target.startsWith('group_');
         final targetId = int.parse(target.split('_')[1]);
 
         bool success = false;
 
+        // 🔵 阶段5：转发统一走 Agora Chat
         if (isGroup) {
-          // 发送群组消息
-          success = await _wsService.sendGroupMessage(
-            groupId: targetId,
-            content: widget.message.content,
-            messageType: widget.message.messageType,
-            fileName: widget.message.fileName,
-          );
+          // 群组：需要 Agora 群会话ID（登录预热已登记映射，缺失则现取群详情补登记）
+          var agoraGid = AgoraChatService().agoraGroupIdFor(targetId);
+          if ((agoraGid == null || agoraGid.isEmpty) && _token != null) {
+            try {
+              final resp = await ApiService.getGroupDetail(
+                token: _token!,
+                groupId: targetId,
+              );
+              final gid = resp['data']?['group']?['agora_group_id'] as String?;
+              if (gid != null && gid.isNotEmpty) {
+                AgoraChatService().registerGroupMapping(targetId, gid);
+                agoraGid = gid;
+              }
+            } catch (_) {}
+          }
+          if (agoraGid != null && agoraGid.isNotEmpty) {
+            final sent = isTextLike
+                ? await AgoraChatService().sendGroupText(
+                    agoraGroupId: agoraGid,
+                    content: content,
+                    ext: {
+                      AgoraChatService.extSenderName: userName,
+                      AgoraChatService.extSenderAvatar: userAvatar,
+                      if (userFullName.isNotEmpty)
+                        AgoraChatService.extSenderFullName: userFullName,
+                      AgoraChatService.extMessageType: msgType,
+                    },
+                  )
+                : await AgoraChatService().sendGroupMedia(
+                    agoraGroupId: agoraGid,
+                    url: content,
+                    messageType: msgType,
+                    senderName: userName,
+                    senderAvatar: userAvatar,
+                    senderFullName: userFullName.isEmpty ? null : userFullName,
+                    fileName: fileName,
+                  );
+            success = sent != null;
+          }
         } else {
-          // 发送私聊消息
-          success = await _wsService.sendMessage(
-            receiverId: targetId,
-            content: widget.message.content,
-            messageType: widget.message.messageType,
-            fileName: widget.message.fileName,
-          );
+          // 私聊
+          final sent = isTextLike
+              ? await AgoraChatService().sendText(
+                  toUserId: targetId,
+                  content: content,
+                  ext: {
+                    AgoraChatService.extSenderName: userName,
+                    AgoraChatService.extSenderAvatar: userAvatar,
+                    AgoraChatService.extMessageType: msgType,
+                  },
+                )
+              : await AgoraChatService().sendMedia(
+                  toUserId: targetId,
+                  url: content,
+                  messageType: msgType,
+                  senderName: userName,
+                  senderAvatar: userAvatar,
+                  fileName: fileName,
+                );
+          success = sent != null;
         }
 
         if (success) {
           successCount++;
+          // 🔵 转发成功后更新发送方会话列表：自己发出的消息不会回流到 messageStream
+          // （messagesReceiveCallbackIncludeSend=false）。复用退出聊天页时验证可靠的
+          // _updateSingleContact（读 Agora 最新消息）：已存在→更新最新消息并置顶，
+          // 不存在→重新加载以新建；markRead=false 不清我对该会话的未读。收发双方都会有该会话。
+          MobileHomePage.updateConversationOnOutgoing(
+            targetId,
+            isGroup: isGroup,
+          );
         }
 
         // 添加小延迟，避免发送过快

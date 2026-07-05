@@ -1,12 +1,13 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:youdu/utils/storage.dart';
-import 'package:youdu/utils/app_localizations.dart';
-import 'package:youdu/main.dart';
-import 'package:youdu/services/update_service.dart';
-import 'package:youdu/widgets/update_dialog.dart';
-import 'package:youdu/models/update_info.dart';
+import 'package:telegram/utils/storage.dart';
+import 'package:telegram/utils/app_localizations.dart';
+import 'package:telegram/main.dart';
+import 'package:telegram/services/update_service.dart';
+import 'package:telegram/widgets/update_dialog.dart';
+import 'package:telegram/models/update_info.dart';
+import '../theme/app_theme.dart';
 
 /// 移动端设置页面
 class MobileSettingsPage extends StatefulWidget {
@@ -76,8 +77,9 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
   @override
   Widget build(BuildContext context) {
     final i18n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
+      backgroundColor: c.scaffold,
       appBar: AppBar(
         backgroundColor: const Color(0xFF4A90E2),
         elevation: 0,
@@ -95,7 +97,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
           const SizedBox(height: 16),
           // 设置项列表（去掉分组标题）
           Container(
-            color: Colors.white,
+            color: c.surface,
             child: Column(
               children: [
                 _buildLanguageSetting(),
@@ -141,7 +143,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Text(
                 i18n.translate('copyright'),
-                style: const TextStyle(fontSize: 12, color: Color(0xFF999999)),
+                style: TextStyle(fontSize: 12, color: c.secondaryText),
                 textAlign: TextAlign.center,
               ),
             ),
@@ -155,6 +157,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
   /// 语言设置项
   Widget _buildLanguageSetting() {
     final i18n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
     return InkWell(
       onTap: () {
         _showLanguageDialog();
@@ -165,15 +168,15 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
           children: [
             Text(
               i18n.translate('language_setting'),
-              style: const TextStyle(fontSize: 16, color: Color(0xFF333333)),
+              style: TextStyle(fontSize: 16, color: c.primaryText),
             ),
             const Spacer(),
             Text(
               _selectedLanguage,
-              style: const TextStyle(fontSize: 14, color: Color(0xFF999999)),
+              style: TextStyle(fontSize: 14, color: c.secondaryText),
             ),
             const SizedBox(width: 8),
-            const Icon(Icons.chevron_right, size: 20, color: Color(0xFFCCCCCC)),
+            Icon(Icons.chevron_right, size: 20, color: c.icon),
           ],
         ),
       ),
@@ -186,6 +189,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
     required bool value,
     required ValueChanged<bool> onChanged,
   }) {
+    final c = AppColors.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
@@ -193,7 +197,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(fontSize: 16, color: Color(0xFF333333)),
+              style: TextStyle(fontSize: 16, color: c.primaryText),
             ),
           ),
           Switch(
@@ -212,6 +216,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
     String? subtitle,
     required VoidCallback onTap,
   }) {
+    final c = AppColors.of(context);
     return InkWell(
       onTap: onTap,
       child: Padding(
@@ -221,17 +226,17 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(fontSize: 16, color: Color(0xFF333333)),
+                style: TextStyle(fontSize: 16, color: c.primaryText),
               ),
             ),
             if (subtitle != null) ...[
               Text(
                 subtitle,
-                style: const TextStyle(fontSize: 14, color: Color(0xFF999999)),
+                style: TextStyle(fontSize: 14, color: c.secondaryText),
               ),
               const SizedBox(width: 8),
             ],
-            const Icon(Icons.chevron_right, size: 20, color: Color(0xFFCCCCCC)),
+            Icon(Icons.chevron_right, size: 20, color: c.icon),
           ],
         ),
       ),
@@ -299,15 +304,16 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
 
   /// 信息行
   Widget _buildInfoRow(String label, String value) {
+    final c = AppColors.of(context);
     return Row(
       children: [
         Text(
           '$label：',
-          style: const TextStyle(fontSize: 14, color: Color(0xFF666666)),
+          style: TextStyle(fontSize: 14, color: c.secondaryText),
         ),
         Text(
           value,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+          style: TextStyle(fontSize: 14, color: c.primaryText),
         ),
       ],
     );
@@ -476,6 +482,7 @@ class _AboutDialogState extends State<_AboutDialog> {
   @override
   Widget build(BuildContext context) {
     final i18n = AppLocalizations.of(context);
+    final c = AppColors.of(context);
     // 初始化默认文本
     if (_currentVersion.isEmpty) {
       _currentVersion = i18n.translate('loading');
@@ -521,7 +528,7 @@ class _AboutDialogState extends State<_AboutDialog> {
                 const SizedBox(width: 12),
                 Text(
                   i18n.translate('checking_update'),
-                  style: const TextStyle(fontSize: 14, color: Color(0xFF666666)),
+                  style: TextStyle(fontSize: 14, color: c.secondaryText),
                 ),
               ],
             )
@@ -530,7 +537,7 @@ class _AboutDialogState extends State<_AboutDialog> {
               _statusText,
               style: TextStyle(
                 fontSize: 14,
-                color: _hasUpdate ? const Color(0xFF4A90E2) : const Color(0xFF666666),
+                color: _hasUpdate ? const Color(0xFF4A90E2) : c.secondaryText,
                 fontWeight: _hasUpdate ? FontWeight.w500 : FontWeight.normal,
               ),
             ),
@@ -539,12 +546,12 @@ class _AboutDialogState extends State<_AboutDialog> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF5F5F5),
+                  color: c.surfaceVariant,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
                   _releaseNotes!,
-                  style: const TextStyle(fontSize: 13, color: Color(0xFF666666)),
+                  style: TextStyle(fontSize: 13, color: c.secondaryText),
                 ),
               ),
             ],
@@ -571,15 +578,16 @@ class _AboutDialogState extends State<_AboutDialog> {
 
   /// 信息行
   Widget _buildInfoRow(String label, String value) {
+    final c = AppColors.of(context);
     return Row(
       children: [
         Text(
           '$label：',
-          style: const TextStyle(fontSize: 14, color: Color(0xFF666666)),
+          style: TextStyle(fontSize: 14, color: c.secondaryText),
         ),
         Text(
           value,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+          style: TextStyle(fontSize: 14, color: c.primaryText),
         ),
       ],
     );

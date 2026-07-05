@@ -1,13 +1,13 @@
 package services
 
 import (
-	"encoding/json"
+	"fmt"
 	"time"
 
-	"youdu-server/db"
-	"youdu-server/models"
-	"youdu-server/utils"
-	ws "youdu-server/websocket"
+	"telegram-server/db"
+	"telegram-server/models"
+	"telegram-server/utils"
+	ws "telegram-server/websocket"
 )
 
 // ScheduledMessageService 定时消息服务
@@ -109,28 +109,22 @@ func (s *ScheduledMessageService) sendMessage(msg *models.ScheduledMessage) {
 }
 
 // sendPrivateMessage 发送私聊消息
+//
+// 迁移到 Agora Chat：不再写入 messages 表，改为以发送者身份通过 Agora Chat REST 代发文本消息。
+// 代发的消息会持久化进 Agora 会话并支持离线投递，发送方与接收方的客户端均通过 onMessagesReceived 收到。
 func (s *ScheduledMessageService) sendPrivateMessage(msg *models.ScheduledMessage) error {
 	// 获取发送者信息
 	sender, err := s.userRepo.FindByID(msg.SenderID)
 	if err != nil {
 		return err
 	}
-	
+
 	// 获取接收者信息
 	receiver, err := s.userRepo.FindByID(msg.ReceiverID)
 	if err != nil {
 		return err
 	}
-	
-	// 保存消息到数据库
-	query := `
-		INSERT INTO messages (sender_id, receiver_id, sender_name, receiver_name, sender_avatar, receiver_avatar, content, message_type, status, is_read, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'text', 'normal', false, $8)
-		RETURNING id, created_at
-	`
-	
-	var messageID int
-	var createdAt time.Time
+
 	senderName := sender.Username
 	if sender.FullName != nil && *sender.FullName != "" {
 		senderName = *sender.FullName
@@ -139,73 +133,39 @@ func (s *ScheduledMessageService) sendPrivateMessage(msg *models.ScheduledMessag
 	if receiver.FullName != nil && *receiver.FullName != "" {
 		receiverName = *receiver.FullName
 	}
-	
-	err = db.DB.QueryRow(
-		query,
-		msg.SenderID,
-		msg.ReceiverID,
-		senderName,
-		receiverName,
-		sender.Avatar,
-		receiver.Avatar,
-		msg.Content,
-		time.Now().UTC(),
-	).Scan(&messageID, &createdAt)
-	
-	if err != nil {
+
+	// 透传业务字段，保证客户端按既有 ext 契约还原渲染
+	ext := map[string]interface{}{
+		"sender_name":     senderName,
+		"sender_avatar":   sender.Avatar,
+		"receiver_name":   receiverName,
+		"receiver_avatar": receiver.Avatar,
+		"message_type":    "text",
+	}
+
+	if err := AgoraChatGroup.SendUserText(msg.SenderID, msg.ReceiverID, msg.Content, ext); err != nil {
 		return err
 	}
-	
-	// 构造WebSocket消息
-	wsMsg := models.WSMessage{
-		Type: "message",
-		Data: models.WSMessageData{
-			ID:           messageID,
-			SenderID:     msg.SenderID,
-			ReceiverID:   msg.ReceiverID,
-			SenderName:   senderName,
-			ReceiverName: receiverName,
-			SenderAvatar: &sender.Avatar,
-			ReceiverAvatar: &receiver.Avatar,
-			Content:      msg.Content,
-			MessageType:  "text",
-			IsRead:       false,
-			CreatedAt:    createdAt.UTC(),
-		},
-	}
-	
-	msgBytes, err := json.Marshal(wsMsg)
-	if err != nil {
-		return err
-	}
-	
-	// 发送给接收者
-	s.hub.SendToUser(msg.ReceiverID, msgBytes)
-	
-	// 🔴 新增：也发送给发送者自己，让发送者的客户端同步更新
-	s.hub.SendToUser(msg.SenderID, msgBytes)
-	
-	utils.LogDebug("✅ [定时消息] 私聊消息发送成功 - MessageID: %d, 发送者: %s, 接收者: %s", 
-		messageID, senderName, receiverName)
-	
+
+	utils.LogDebug("✅ [定时消息] 私聊消息已代发(Agora) - 发送者: %s, 接收者: %s", senderName, receiverName)
 	return nil
 }
 
 // sendGroupMessage 发送群聊消息
+//
+// 迁移到 Agora Chat：不再写入 group_messages 表，改为以发送者身份通过 Agora Chat REST 向群代发文本消息。
 func (s *ScheduledMessageService) sendGroupMessage(msg *models.ScheduledMessage) error {
 	// 获取发送者信息
 	sender, err := s.userRepo.FindByID(msg.SenderID)
 	if err != nil {
 		return err
 	}
-	
-	// 获取发送者在群组中的昵称
+
+	// 获取发送者在群组中的昵称（群昵称 > 全名 > 用户名）
 	senderName := sender.Username
 	if sender.FullName != nil && *sender.FullName != "" {
 		senderName = *sender.FullName
 	}
-	
-	// 尝试获取群昵称
 	nickname, fullName, _, _, err := s.groupRepo.GetGroupMemberInfo(msg.ReceiverID, msg.SenderID)
 	if err == nil {
 		if nickname != nil && *nickname != "" {
@@ -214,69 +174,24 @@ func (s *ScheduledMessageService) sendGroupMessage(msg *models.ScheduledMessage)
 			senderName = *fullName
 		}
 	}
-	
-	// 保存消息到数据库
-	query := `
-		INSERT INTO group_messages (group_id, sender_id, sender_name, sender_avatar, content, message_type, created_at)
-		VALUES ($1, $2, $3, $4, $5, 'text', $6)
-		RETURNING id, created_at
-	`
-	
-	var messageID int
-	var createdAt time.Time
-	
-	err = db.DB.QueryRow(
-		query,
-		msg.ReceiverID,
-		msg.SenderID,
-		senderName,
-		sender.Avatar,
-		msg.Content,
-		time.Now().UTC(),
-	).Scan(&messageID, &createdAt)
-	
-	if err != nil {
+
+	// 解析本地群ID对应的 Agora 群会话ID
+	agoraGroupID, err := s.groupRepo.GetAgoraGroupID(msg.ReceiverID)
+	if err != nil || agoraGroupID == "" {
+		utils.LogDebug("⚠️ [定时消息] 群 %d 未同步到 Agora（agora_group_id 为空），跳过群消息代发", msg.ReceiverID)
+		return fmt.Errorf("群 %d 缺少 agora_group_id", msg.ReceiverID)
+	}
+
+	ext := map[string]interface{}{
+		"sender_name":   senderName,
+		"sender_avatar": sender.Avatar,
+		"message_type":  "text",
+	}
+
+	if err := AgoraChatGroup.SendGroupText(msg.SenderID, agoraGroupID, msg.Content, ext); err != nil {
 		return err
 	}
-	
-	// 获取群组所有成员ID
-	memberIDs, err := s.groupRepo.GetGroupMemberIDs(msg.ReceiverID)
-	if err != nil {
-		return err
-	}
-	
-	// 构造WebSocket消息
-	wsGroupMsg := map[string]interface{}{
-		"type":     "group_message",
-		"group_id": msg.ReceiverID,
-		"data": map[string]interface{}{
-			"id":           messageID,
-			"group_id":     msg.ReceiverID,
-			"sender_id":    msg.SenderID,
-			"sender_name":  senderName,
-			"sender_avatar": sender.Avatar,
-			"content":      msg.Content,
-			"message_type": "text",
-			"is_read":      false,
-			"created_at":   createdAt.UTC().Format(time.RFC3339Nano),
-		},
-	}
-	
-	msgBytes, err := json.Marshal(wsGroupMsg)
-	if err != nil {
-		return err
-	}
-	
-	// 🔴 修改：向所有群组成员发送消息（包括发送者自己）
-	sentCount := 0
-	for _, memberID := range memberIDs {
-		if s.hub.SendToUser(memberID, msgBytes) {
-			sentCount++
-		}
-	}
-	
-	utils.LogDebug("✅ [定时消息] 群聊消息发送成功 - MessageID: %d, GroupID: %d, 发送者: %s, 在线接收者: %d", 
-		messageID, msg.ReceiverID, senderName, sentCount)
-	
+
+	utils.LogDebug("✅ [定时消息] 群聊消息已代发(Agora) - GroupID: %d, Agora群: %s, 发送者: %s", msg.ReceiverID, agoraGroupID, senderName)
 	return nil
 }

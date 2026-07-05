@@ -1,7 +1,7 @@
 // 简化版本发布脚本 - 只需提供下载URL
 // 适用于所有平台，不需要上传文件到OSS
 // 使用方法:
-//   go run publish_version_simple.go -platform android -version 1.0.1 -code 2 -url "https://cdn.example.com/youdu_1.0.1.apk" -notes "更新说明"
+//   go run publish_version_simple.go -platform android -version 1.0.1 -code 2 -url "https://cdn.example.com/telegram_1.0.1.apk" -notes "更新说明"
 
 package main
 
@@ -145,7 +145,7 @@ func printUsage() {
 	fmt.Println("    -platform android \\")
 	fmt.Println("    -version 1.0.1 \\")
 	fmt.Println("    -code 2 \\")
-	fmt.Println("    -url \"https://cdn.example.com/youdu_1.0.1.apk\" \\")
+	fmt.Println("    -url \"https://cdn.example.com/telegram_1.0.1.apk\" \\")
 	fmt.Println("    -notes \"修复已知问题\" \\")
 	fmt.Println("    -size 52428800 \\")
 	fmt.Println("    -md5 \"abc123def456\" \\")
@@ -155,7 +155,7 @@ func printUsage() {
 	fmt.Println("    -platform windows \\")
 	fmt.Println("    -version 1.0.1 \\")
 	fmt.Println("    -code 2 \\")
-	fmt.Println("    -url \"https://cdn.example.com/youdu_1.0.1.exe\" \\")
+	fmt.Println("    -url \"https://cdn.example.com/telegram_1.0.1.exe\" \\")
 	fmt.Println("    -notes \"新功能\" \\")
 	fmt.Println("    -publish")
 	fmt.Println("\n  # iOS (TestFlight)")

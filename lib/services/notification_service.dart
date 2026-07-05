@@ -2,7 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:youdu/utils/logger.dart';
+import 'package:telegram/utils/logger.dart';
 
 /// 本地通知服务 - 用于锁屏消息提醒和悬浮通知（Heads-up）
 class NotificationService with WidgetsBindingObserver {
@@ -360,13 +360,13 @@ class NotificationService with WidgetsBindingObserver {
     if (Platform.isAndroid) {
       try {
         // 使用 MethodChannel 打开通知渠道设置（直接打开"消息通知"渠道）
-        const platform = MethodChannel('com.example.youdu/notification');
+        const platform = MethodChannel('com.example.telegram/notification');
         await platform.invokeMethod(
             'openChannelSettings', {'channelId': 'message_channel_v3'});
       } catch (e) {
         logger.error('🔔 打开通知渠道设置失败: $e, 尝试打开应用通知设置');
         try {
-          const platform = MethodChannel('com.example.youdu/notification');
+          const platform = MethodChannel('com.example.telegram/notification');
           await platform.invokeMethod('openNotificationSettings');
         } catch (e2) {
           logger.error('🔔 打开应用通知设置也失败: $e2');
