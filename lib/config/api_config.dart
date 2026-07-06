@@ -16,11 +16,13 @@ class ApiConfig {
   //   - 国内: 使用 xbdchat.cc (HTTPS 8280/8281)
   //   - 海外: 使用 xbdchat.cc (HTTPS 8180/8181)
   static String get defaultHost {
-    // if (!kDebugMode) {
+    if (!kDebugMode) {
       return 'xbdchat.cc';
-    // } else {
-      // return '192.168.1.20';
-    // }
+    } else if (Platform.isWindows) {
+      return '127.0.0.1';
+    } else {
+      return '192.168.1.20';
+    }
   }
   
   // 端口配置：国内 8280/8281，海外 8180/8181

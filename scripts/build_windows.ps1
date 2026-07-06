@@ -263,6 +263,60 @@ $ZipSizeMB = [math]::Round((Get-Item $ZipPath).Length / 1MB, 2)
 Write-Success "Package created: $ZipPath ($ZipSizeMB MB)"
 Write-Host ""
 
+# Build the binary installer (single-file YouduInstaller.exe with embedded app files)
+# Same flow as install\YouduInstaller\build_single_exe.bat, integrated here
+Write-Info "Building binary installer (YouduInstaller)..."
+
+$DotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+if (-not $DotnetCmd) {
+    Write-Error ".NET SDK not found. Please install .NET 8.0 SDK: https://dotnet.microsoft.com/download/dotnet/8.0"
+    Read-Host "Press any key to exit"
+    exit 1
+}
+
+$InstallerDir = Join-Path $ProjectPath "install\YouduInstaller"
+$ResourceDir = Join-Path $InstallerDir "Resources"
+$InstallerPublishDir = Join-Path $InstallerDir "publish"
+
+try {
+    # Embed the freshly built Release directory as youdu_files.zip
+    if (-not (Test-Path $ResourceDir)) { New-Item -ItemType Directory -Path $ResourceDir | Out-Null }
+    $EmbeddedZip = Join-Path $ResourceDir "youdu_files.zip"
+    if (Test-Path $EmbeddedZip) { Remove-Item $EmbeddedZip -Force }
+    Copy-Item $ZipPath $EmbeddedZip -Force
+    Write-Success "Embedded app files prepared: youdu_files.zip"
+
+    # Clean previous installer build outputs
+    foreach ($Dir in @("bin", "obj", "publish")) {
+        $DirPath = Join-Path $InstallerDir $Dir
+        if (Test-Path $DirPath) { Remove-Item $DirPath -Recurse -Force }
+    }
+
+    # Compile the self-contained single-file installer
+    dotnet publish $InstallerDir -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o $InstallerPublishDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet publish failed, exit code: $LASTEXITCODE"
+    }
+
+    # Copy versioned installer to dist/
+    $InstallerExe = Join-Path $InstallerPublishDir "TelegramInstall.exe"
+    if (-not (Test-Path $InstallerExe)) {
+        throw "Installer executable not found: $InstallerExe"
+    }
+    $SetupPath = Join-Path $DistDir "TelegramInstall-v$PubspecVersion.exe"
+    Copy-Item $InstallerExe $SetupPath -Force
+    $SetupSizeMB = [math]::Round((Get-Item $SetupPath).Length / 1MB, 2)
+    Write-Success "Installer created: $SetupPath ($SetupSizeMB MB)"
+} catch {
+    Write-Error "Installer build failed: $_"
+    Read-Host "Press any key to exit"
+    exit 1
+} finally {
+    # Clean up embedded resource so the repo stays clean
+    if (Test-Path $ResourceDir) { Remove-Item $ResourceDir -Recurse -Force }
+}
+Write-Host ""
+
 # Show run command tip
 Write-ColorText "💡 Tip: You can now run the following command to start the application:" "Yellow"
 Write-Host "   flutter run -d windows --$BuildMode"

@@ -6992,6 +6992,60 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     logger.debug('📍 [消息位置缓存] 已缓存 ${_messages.length} 条消息的位置 (sessionKey: $sessionKey)');
   }
 
+  /// 建群后选中新群会话；列表中缺失时手动补插到顶部。
+  /// 背景：会话列表来源是 Agora 会话摘要，而建群系统消息走服务器 WS 不经 Agora，
+  /// 创建人在 Agora 服务端还没有该群会话，_loadRecentContacts 全量替换列表后新群会缺失
+  /// （即使 WS 系统消息处理器先插入过，也会被全量替换抹掉）。
+  Future<void> _selectOrInsertCreatedGroup(int groupId, String groupName) async {
+    // 顺带登记 本地群ID↔Agora群ID 映射：群消息收发、会话摘要都依赖它
+    await _ensureAgoraGroupId(groupId);
+    final idx = _recentContacts.indexWhere(
+      (contact) => contact.isGroup && contact.groupId == groupId,
+    );
+    if (idx != -1) {
+      setState(() {
+        _selectedChatIndex = idx;
+      });
+      logger.debug('✅ 已更新选中索引到新群组位置: $idx');
+      return;
+    }
+    logger.debug('⚠️ 新群组不在会话列表中（Agora 尚无该会话），手动补插到列表顶部');
+    String? avatar;
+    String? remark;
+    try {
+      final token = _token;
+      if (token != null && token.isNotEmpty) {
+        final resp = await ApiService.getGroupDetail(
+          token: token,
+          groupId: groupId,
+        );
+        final g = resp['data']?['group'] as Map<String, dynamic>?;
+        if (g != null) {
+          avatar = g['avatar'] as String?;
+          remark = g['remark'] as String?;
+        }
+      }
+    } catch (e) {
+      logger.debug('获取新群详情失败（补插仍继续）: $e');
+    }
+    if (!mounted) return;
+    setState(() {
+      _recentContacts.insert(
+        0,
+        RecentContactModel.group(
+          groupId: groupId,
+          groupName: groupName,
+          avatar: avatar,
+          remark: remark,
+        ),
+      );
+      _selectedChatIndex = 0;
+      // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，插入后必须重建缓存才可见
+      _updateSortedRecentContacts();
+    });
+    logger.debug('✅ 已将新群组手动插入会话列表顶部并选中');
+  }
+
   /// 确保已登记群的 Agora 群会话ID（群消息收发/历史用）。优先映射，否则现取群详情补登记。
   Future<String?> _ensureAgoraGroupId(int localGroupId) async {
     final existing = AgoraChatService().agoraGroupIdFor(localGroupId);
@@ -13317,16 +13371,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         );
         await _loadRecentContacts();
         
-        // 刷新后，重新找到新群组在列表中的位置并更新选中索引
-        final newGroupIndex = _recentContacts.indexWhere(
-          (contact) => contact.isGroup && contact.groupId == createdGroupId,
-        );
-        if (newGroupIndex != -1) {
-          setState(() {
-            _selectedChatIndex = newGroupIndex;
-          });
-          logger.debug('✅ 已更新选中索引到新群组位置: $newGroupIndex');
-        }
+        // 刷新后选中新群组；Agora 服务端尚无创建人的会话时列表会缺失，手动补插
+        await _selectOrInsertCreatedGroup(createdGroupId, createdGroupName);
 
         logger.debug(
           '✅ 已自动切换到新创建的群组聊天窗口 - ID: $createdGroupId, 名称: $createdGroupName',
@@ -13446,16 +13492,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         );
         await _loadRecentContacts();
         
-        // 刷新后，重新找到新群组在列表中的位置并更新选中索引
-        final newGroupIndex = _recentContacts.indexWhere(
-          (contact) => contact.isGroup && contact.groupId == createdGroupId,
-        );
-        if (newGroupIndex != -1) {
-          setState(() {
-            _selectedChatIndex = newGroupIndex;
-          });
-          logger.debug('✅ 已更新选中索引到新群组位置: $newGroupIndex');
-        }
+        // 刷新后选中新群组；Agora 服务端尚无创建人的会话时列表会缺失，手动补插
+        await _selectOrInsertCreatedGroup(createdGroupId, createdGroupName);
 
         logger.debug(
           '✅ 已自动切换到新创建的群组聊天窗口 - ID: $createdGroupId, 名称: $createdGroupName',
@@ -15788,52 +15826,6 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                           ),
                         ),
                       ),
-                    // 未读数量气泡（右上角）
-                    if (contact.unreadCount > 0)
-                      Positioned(
-                        right: -2,
-                        top: -2,
-                        child: contact.doNotDisturb
-                            ? Container(
-                                width: 8,
-                                height: 8,
-                                decoration: const BoxDecoration(
-                                  color: Colors.red,
-                                  shape: BoxShape.circle,
-                                ),
-                              )
-                            : Container(
-                                constraints: contact.unreadCount < 10
-                                    ? null
-                                    : const BoxConstraints(minWidth: 16),
-                                width: contact.unreadCount < 10 ? 16 : null,
-                                height: 16,
-                                padding: contact.unreadCount < 10
-                                    ? null
-                                    : const EdgeInsets.symmetric(horizontal: 4),
-                                decoration: BoxDecoration(
-                                  color: Colors.red,
-                                  shape: contact.unreadCount < 10
-                                      ? BoxShape.circle
-                                      : BoxShape.rectangle,
-                                  borderRadius: contact.unreadCount < 10
-                                      ? null
-                                      : BorderRadius.circular(8),
-                                ),
-                                alignment: Alignment.center,
-                                child: Text(
-                                  contact.unreadCount > 99
-                                      ? '99+'
-                                      : '${contact.unreadCount}',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    height: 1.0,
-                                  ),
-                                ),
-                              ),
-                      ),
                   ],
                 ),
                 const SizedBox(width: 10),
@@ -15909,58 +15901,69 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                       const SizedBox(height: 4),
                       // 🔴 如果最后一条消息已撤回，显示"消息已撤回"
                       // 如果是群组消息且有人@我，显示红色的"[有人@我]"前缀
-                      contact.lastMessageStatus == 'recalled'
-                          ? Text(
-                              '消息已撤回',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: isSelected
-                                    ? Colors.white.withOpacity(0.85)
-                                    : const Color(0xFF999999),
-                                fontStyle: FontStyle.italic,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            )
-                          : contact.isGroup && contact.hasMentionedMe
-                          ? RichText(
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              text: TextSpan(
-                                children: [
-                                  TextSpan(
-                                    text: '[有人@我] ',
+                      // 未读气泡放在时间下方（与移动端会话列表样式一致）
+                      Row(
+                        children: [
+                          Expanded(
+                            child: contact.lastMessageStatus == 'recalled'
+                                ? Text(
+                                    '消息已撤回',
                                     style: TextStyle(
                                       fontSize: 13,
                                       color: isSelected
-                                          ? Colors.white
-                                          : Colors.red,
-                                      fontWeight: FontWeight.w500,
+                                          ? Colors.white.withOpacity(0.85)
+                                          : const Color(0xFF999999),
+                                      fontStyle: FontStyle.italic,
                                     ),
-                                  ),
-                                  TextSpan(
-                                    text: contact.lastMessage,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  )
+                                : contact.isGroup && contact.hasMentionedMe
+                                ? RichText(
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    text: TextSpan(
+                                      children: [
+                                        TextSpan(
+                                          text: '[有人@我] ',
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: isSelected
+                                                ? Colors.white
+                                                : Colors.red,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                        TextSpan(
+                                          text: contact.lastMessage,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: isSelected
+                                                ? Colors.white.withOpacity(0.85)
+                                                : const Color(0xFF999999),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  )
+                                : Text(
+                                    contact.lastMessage,
                                     style: TextStyle(
                                       fontSize: 13,
                                       color: isSelected
                                           ? Colors.white.withOpacity(0.85)
                                           : const Color(0xFF999999),
                                     ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                ],
-                              ),
-                            )
-                          : Text(
-                              contact.lastMessage,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: isSelected
-                                    ? Colors.white.withOpacity(0.85)
-                                    : const Color(0xFF999999),
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                          ),
+                          if (contact.unreadCount > 0) ...[
+                            const SizedBox(width: 8),
+                            _buildUnreadBadgePc(contact, isSelected),
+                          ],
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -15996,6 +15999,44 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       return (firstCharOf(parts[0]) + firstCharOf(parts[1])).toUpperCase();
     }
     return firstCharOf(parts[0]).toUpperCase();
+  }
+
+  /// 未读气泡（与移动端会话列表一致：胶囊徽标，被@红色、免打扰灰点，置于时间下方）
+  Widget _buildUnreadBadgePc(RecentContactModel contact, bool isSelected) {
+    // 免打扰：显示灰色小圆点
+    if (contact.doNotDisturb) {
+      return Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.white : const Color(0xFFB0B0B5),
+          shape: BoxShape.circle,
+        ),
+      );
+    }
+    // 被@：红色徽标；其它：蓝色徽标；选中项蓝底上改用白底蓝字保证可见
+    final badgeColor = contact.hasMentionedMe
+        ? const Color(0xFFFF3B30)
+        : const Color(0xFF007AFF);
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20),
+      height: 20,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: isSelected ? Colors.white : badgeColor,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        contact.unreadCount >= 100 ? '99+' : '${contact.unreadCount}',
+        style: TextStyle(
+          color: isSelected ? _tgSelectedBlue : Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          height: 1.0,
+        ),
+      ),
+    );
   }
 
   /// 是否显示发送状态对勾（仅自己发出的最后一条消息，Telegram 风格）

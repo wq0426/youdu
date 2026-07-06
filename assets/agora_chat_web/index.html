@@ -16,6 +16,39 @@
   window.addEventListener('unhandledrejection', function (e) {
     window.__jsErrors.push('unhandledrejection: ' + String(e && e.reason));
   });
+
+  // 🔴 localStorage 垫片,必须在 SDK 脚本之前:
+  // Windows WebView2 加载 initialData 时不支持 baseUrl,页面运行在 about:blank
+  // (不透明源)上,访问 window.localStorage 直接抛 SecurityError,导致 SDK 脚本
+  // 加载即死、window.websdk/WebIM 均未定义。这里换成内存实现(SDK 只用它缓存
+  // token 等非关键数据,丢失不影响功能)。macOS WKWebView 支持 baseUrl,不走此分支。
+  (function () {
+    function memStorage() {
+      var store = {};
+      return {
+        getItem: function (k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
+        setItem: function (k, v) { store[String(k)] = String(v); },
+        removeItem: function (k) { delete store[String(k)]; },
+        clear: function () { store = {}; },
+        key: function (i) { var ks = Object.keys(store); return i < ks.length ? ks[i] : null; },
+        get length() { return Object.keys(store).length; }
+      };
+    }
+    function shim(name) {
+      try {
+        window[name].getItem('__probe__');
+      } catch (e) {
+        try {
+          Object.defineProperty(window, name, { value: memStorage(), configurable: true });
+          window.__jsErrors.push('info: ' + name + ' 不可用,已启用内存垫片');
+        } catch (e2) {
+          window.__jsErrors.push('shim ' + name + ' 失败: ' + String(e2));
+        }
+      }
+    }
+    shim('localStorage');
+    shim('sessionStorage');
+  })();
 </script>
 <!-- __AGORA_CHAT_SDK__ -->
 <!--

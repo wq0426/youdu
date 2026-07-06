@@ -114,3 +114,5 @@ ios/Podfile.lock
 dist/
 
 admin.tar.gz
+macos
+android

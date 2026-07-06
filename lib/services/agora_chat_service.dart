@@ -1555,21 +1555,31 @@ class AgoraChatService {
     final ext = (m['ext'] is Map)
         ? Map<String, dynamic>.from(m['ext'] as Map)
         : <String, dynamic>{};
+    // 🔴 fromJson 的枚举字段(direction/body.type/chatType/status)都要求
+    // 枚举下标 int，传字符串会抛 type 'String' is not a subtype of type 'int'；
+    // 会话ID的键是 convId 而非 conversationId。
     return ChatMessage.fromJson({
       'from': from,
       'to': to,
       'body': isCmd
-          ? {'type': 'cmd', 'action': m['action']?.toString() ?? ''}
-          : {'type': 'txt', 'content': m['msg']?.toString() ?? ''},
+          ? {
+              'type': MessageType.CMD.index,
+              'action': m['action']?.toString() ?? '',
+            }
+          : {
+              'type': MessageType.TXT.index,
+              'content': m['msg']?.toString() ?? '',
+            },
       'attributes': ext,
-      'direction': isSend ? 'send' : 'rec',
+      'direction': (isSend ? MessageDirection.SEND : MessageDirection.RECEIVE)
+          .index,
       'msgId': m['id']?.toString() ?? '',
       // 单聊会话ID=对端;群聊=Agora群ID(to)
-      'conversationId': isGroup ? to : (isSend ? to : from),
-      'chatType': isGroup ? 1 : 0,
+      'convId': isGroup ? to : (isSend ? to : from),
+      'chatType': (isGroup ? ChatType.GroupChat : ChatType.Chat).index,
       'serverTime': time,
       'localTime': time,
-      'status': 2, // SUCCESS
+      'status': MessageStatus.SUCCESS.index,
     });
   }
 
