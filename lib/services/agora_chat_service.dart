@@ -1704,27 +1704,28 @@ class AgoraChatService {
     final ext = (m['ext'] is Map)
         ? Map<String, dynamic>.from(m['ext'] as Map)
         : <String, dynamic>{};
-    // 🔴 agora_chat_sdk 1.3.3 的 fromJson：body.type/direction 是字符串
-    // ('txt'/'cmd'、'send'/'rec')，body.type 不匹配时 _bodyFromMap 返回 null
-    // 会被 `!` 断言抛 Null check operator；chatType/status 仍是 int；
-    // 会话ID的键是 conversationId。
+    // 🔴 agora_chat_sdk 1.4.0 的 fromJson：body.type/direction 都是枚举下标 int
+    // （1.3.3 时代是字符串 'txt'/'cmd'、'send'/'rec'，1.4.0 传字符串会抛
+    // "type 'String' is not a subtype of type 'int'"）；
+    // 会话ID的键也从 conversationId 改成了 convId。升级 SDK 时需复查此格式。
     return ChatMessage.fromJson({
       'from': from,
       'to': to,
       'body': isCmd
           ? {
-              'type': 'cmd',
+              'type': MessageType.CMD.index,
               'action': m['action']?.toString() ?? '',
             }
           : {
-              'type': 'txt',
+              'type': MessageType.TXT.index,
               'content': m['msg']?.toString() ?? '',
             },
       'attributes': ext,
-      'direction': isSend ? 'send' : 'rec',
+      'direction':
+          (isSend ? MessageDirection.SEND : MessageDirection.RECEIVE).index,
       'msgId': m['id']?.toString() ?? '',
       // 单聊会话ID=对端;群聊=Agora群ID(to)
-      'conversationId': isGroup ? to : (isSend ? to : from),
+      'convId': isGroup ? to : (isSend ? to : from),
       'chatType': (isGroup ? ChatType.GroupChat : ChatType.Chat).index,
       'serverTime': time,
       'localTime': time,

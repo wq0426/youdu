@@ -69,7 +69,7 @@ dependencies:
   flutter_background_service_android: ^6.2.3  # Android后台服务
   flutter_background_service_ios: ^5.0.1  # iOS后台服务
   # jpush_flutter: ^2.5.1  # 极光推送 - 暂时禁用，等待兼容 AGP 8.x 的版本
-  agora_chat_sdk: ^1.3.3  # 声网 Agora Chat 即时通讯 SDK（消息收发，替代自建后端消息体系）
+  agora_chat_sdk: 1.4.0  # 声网 Agora Chat 即时通讯 SDK（消息收发，替代自建后端消息体系）。桌面端桥接 _chatMessageFromBridgeMap 依赖其 fromJson 的字段格式，升级前必须复查
 
 dependency_overrides:
   record_linux: ^1.0.0

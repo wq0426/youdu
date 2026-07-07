@@ -10,9 +10,11 @@ class ApiConfig {
   // 默认服务器配置
   // 🔥 自动根据debug/release模式和平台切换服务器地址和协议
   // Debug模式:
-  //   - macOS: 使用 192.168.1.20 (HTTP 8180/8181)
-  //   - Windows: 使用 192.168.1.6 (HTTP 8180/8181)
-  // Release模式: 
+  //   - Windows桌面端: 使用 127.0.0.1
+  //   - Android(APK)真机: 使用 Windows 开发机局域网IP 192.168.1.6
+  //   - macOS桌面端: 使用 Mac 开发环境 192.168.1.20
+  //   - 其他平台(iOS等，在Mac环境开发): 使用 192.168.1.20
+  // Release模式:
   //   - 国内: 使用 xbdchat.cc (HTTPS 8280/8281)
   //   - 海外: 使用 xbdchat.cc (HTTPS 8180/8181)
   static String get defaultHost {
@@ -20,6 +22,10 @@ class ApiConfig {
       return 'xbdchat.cc';
     } else if (Platform.isWindows) {
       return '127.0.0.1';
+    } else if (Platform.isAndroid) {
+      return '192.168.1.6';
+    } else if (Platform.isMacOS) {
+      return '192.168.1.20';
     } else {
       return '192.168.1.20';
     }

@@ -29,28 +29,13 @@ import 'package:package_info_plus/package_info_plus.dart';
 /// HTTPS 证书信任配置（仅开发环境）
 /// ⚠️ 生产环境绝不要使用此配置！
 class MyHttpOverrides extends HttpOverrides {
-  /// 判断是否为本机或局域网地址
-  static bool _isLocalOrLanHost(String host) {
-    return host == 'localhost' ||
-        host == '127.0.0.1' ||
-        host == '::1' ||
-        host.startsWith('192.168.') ||
-        host.startsWith('10.') ||
-        host.startsWith('172.');
-  }
-
   @override
   HttpClient createHttpClient(SecurityContext? context) {
     return super.createHttpClient(context)
-      // 本机/局域网地址永远直连：
-      // Dart HttpClient 默认读取 HTTP_PROXY/HTTPS_PROXY 环境变量，
-      // 开发机上开着代理软件时，发往本地后端的请求会被转给代理导致连接被拒绝，
-      // 等效于环境变量 NO_PROXY=localhost,127.0.0.1，但无需用户手动设置
+      // 所有请求一律直连，完全忽略系统代理和 HTTP_PROXY 等环境变量，
+      // 开发机上的代理软件不会影响应用的任何网络请求
       ..findProxy = (Uri uri) {
-        if (_isLocalOrLanHost(uri.host)) {
-          return 'DIRECT';
-        }
-        return HttpClient.findProxyFromEnvironment(uri);
+        return 'DIRECT';
       }
       ..badCertificateCallback = (X509Certificate cert, String host, int port) {
         // 信任自签名证书（内网部署场景）
