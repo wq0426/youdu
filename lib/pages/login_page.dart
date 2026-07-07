@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'forgot_password_page.dart';
 import 'register_page.dart';
 import 'package:telegram/services/api_service.dart';
@@ -36,17 +38,16 @@ class _LoginPageState extends State<LoginPage> {
   bool _canLogin = false;
   bool _isLoading = false; // 登录加载状态
 
+  // PC端扫码登录状态
+  Timer? _qrPollTimer;
+  String? _qrId;
+  // loading:生成中 / pending:等待扫描 / scanned:已扫描待手机确认
+  // cancelled:手机取消 / expired:二维码失效 / error:生成失败
+  String _qrStatus = 'loading';
+  String _scannedNickname = '';
+
   // 检测是否是PC端
   bool get _isDesktop => Platform.isWindows || Platform.isMacOS || Platform.isLinux;
-
-  // 统一的标签样式
-  TextStyle _labelStyle(BuildContext context) => TextStyle(
-        fontSize: 14,
-        color: AppColors.of(context).primaryText,
-        fontWeight: FontWeight.w500,
-        height: 1.0,
-        letterSpacing: 0,
-      );
 
   @override
   void initState() {
@@ -54,9 +55,15 @@ class _LoginPageState extends State<LoginPage> {
     _accountController.addListener(_checkCanLogin);
     _passwordController.addListener(_checkCanLogin);
 
-    // 加载保存的登录信息
-    _loadSavedCredentials();
-    
+    if (_isDesktop) {
+      // 🔴 PC端只允许扫码登录：进入登录页即生成二维码
+      _createQRLoginSession();
+    } else {
+      // 移动端：加载保存的登录信息
+      _loadSavedCredentials();
+    }
+
+
     // 🔴 页面加载完成后清除之前的 SnackBar 提示（如"您的账号已在其他设备登录"）
     // 🔴 同时清除 WebSocket 的 onForcedLogout 回调，防止旧连接继续触发提示
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -191,74 +198,11 @@ class _LoginPageState extends State<LoginPage> {
         final token = result['data']['token'];
         final user = result['data']['user'];
 
-        // 🔴 重置 WebSocket 强制登出状态，允许重新建立连接
-        WebSocketService().resetForcedLogoutState();
-
-        // 保存token和用户信息
-        await Storage.saveLoginInfo(
-          token: token,
-          userId: user['id'],
-          username: user['username'],
-          fullName: user['full_name'],
-          avatar: user['avatar'],
-        );
-
-        // 🔄 获取并保存OSS前缀域名配置
-        logger.info('🔄 [OSS配置] 开始获取OSS前缀域名配置...');
-        logger.debug('🔄 [OSS配置] Token: ${token.substring(0, 20)}...');
-        try {
-          logger.debug('🔄 [OSS配置] 调用 ApiService.getOSSPrefixConfig...');
-          final ossConfigResult = await ApiService.getOSSPrefixConfig(token: token);
-          logger.debug('🔄 [OSS配置] API返回结果: $ossConfigResult');
-          
-          if (ossConfigResult['code'] == 0) {
-            final ossData = ossConfigResult['data'];
-            logger.debug('🔄 [OSS配置] 解析数据: $ossData');
-            
-            await Storage.saveOSSPrefixConfig(
-              oldPrefixDomain: ossData['old_prefix_domain'],
-              newPrefixDomain: ossData['new_prefix_domain'],
-            );
-            logger.info('✅ [OSS配置] OSS前缀域名配置已保存: ${ossData['old_prefix_domain']} -> ${ossData['new_prefix_domain']}');
-          } else {
-            logger.debug('⚠️ [OSS配置] 获取OSS前缀域名配置失败: ${ossConfigResult['message']}');
-          }
-        } catch (e, stackTrace) {
-          logger.debug('⚠️ [OSS配置] 获取OSS前缀域名配置异常: $e');
-          logger.debug('⚠️ [OSS配置] 堆栈跟踪: $stackTrace');
-        }
-
-        // 重新初始化日志系统（使用用户ID）
-        await logger.init(userId: user['id'].toString());
-        logger.info('📝 日志系统已重新初始化，用户ID: ${user['id']}');
-
         // 保存登录配置和账号密码（根据平台和用户选择）
         await _saveCredentials(user['id'], username, password);
 
-        // 注意：用户状态已在后端登录接口中自动设置为 online，无需前端再次设置
-        logger.debug('✅ 用户登录成功，状态: ${user['status']}');
-
-        // 🔵 阶段6：离线消息改由 Agora Chat 投递，不再清除后端同步记账记录。
-
-        // 🔴 登录成功后清除所有本地缓存
-        logger.info('🗑️ 账号密码登录成功，开始清除所有本地缓存...');
-        MobileChatPage.clearAllCache();
-        MobileContactsPage.clearAllCache();
-        MobileHomePage.clearAllCache();
-        
-        // 🔴 清除Flutter图片缓存（避免切换账号后显示旧头像）
-        PaintingBinding.instance.imageCache.clear();
-        PaintingBinding.instance.imageCache.clearLiveImages();
-        logger.info('🖼️ Flutter图片缓存已清除');
-        
-        logger.info('✅ 所有本地缓存已清除，即将重新加载数据');
-
-        _showSuccess('登录成功');
-
-        // 跳转到主页
-        if (mounted) {
-          Navigator.pushReplacementNamed(context, '/home');
-        }
+        // 完成登录（保存token、拉取配置、清缓存、跳转主页）
+        await _completeLogin(token, user);
       } else {
         // 登录失败，重置加载状态
         setState(() {
@@ -275,6 +219,159 @@ class _LoginPageState extends State<LoginPage> {
         _isLoading = false;
       });
       _showError('登录失败: $e');
+    }
+  }
+
+  // 登录成功后的公共流程：保存token、拉取OSS配置、清缓存、跳转主页
+  // （移动端账号密码登录和PC端扫码登录共用）
+  Future<void> _completeLogin(String token, Map<String, dynamic> user) async {
+    // 🔴 重置 WebSocket 强制登出状态，允许重新建立连接
+    WebSocketService().resetForcedLogoutState();
+
+    // 保存token和用户信息
+    await Storage.saveLoginInfo(
+      token: token,
+      userId: user['id'],
+      username: user['username'],
+      fullName: user['full_name'],
+      avatar: user['avatar'],
+    );
+
+    // 🔄 获取并保存OSS前缀域名配置
+    logger.info('🔄 [OSS配置] 开始获取OSS前缀域名配置...');
+    logger.debug('🔄 [OSS配置] Token: ${token.substring(0, 20)}...');
+    try {
+      logger.debug('🔄 [OSS配置] 调用 ApiService.getOSSPrefixConfig...');
+      final ossConfigResult = await ApiService.getOSSPrefixConfig(token: token);
+      logger.debug('🔄 [OSS配置] API返回结果: $ossConfigResult');
+
+      if (ossConfigResult['code'] == 0) {
+        final ossData = ossConfigResult['data'];
+        logger.debug('🔄 [OSS配置] 解析数据: $ossData');
+
+        await Storage.saveOSSPrefixConfig(
+          oldPrefixDomain: ossData['old_prefix_domain'],
+          newPrefixDomain: ossData['new_prefix_domain'],
+        );
+        logger.info('✅ [OSS配置] OSS前缀域名配置已保存: ${ossData['old_prefix_domain']} -> ${ossData['new_prefix_domain']}');
+      } else {
+        logger.debug('⚠️ [OSS配置] 获取OSS前缀域名配置失败: ${ossConfigResult['message']}');
+      }
+    } catch (e, stackTrace) {
+      logger.debug('⚠️ [OSS配置] 获取OSS前缀域名配置异常: $e');
+      logger.debug('⚠️ [OSS配置] 堆栈跟踪: $stackTrace');
+    }
+
+    // 重新初始化日志系统（使用用户ID）
+    await logger.init(userId: user['id'].toString());
+    logger.info('📝 日志系统已重新初始化，用户ID: ${user['id']}');
+
+    // 注意：用户状态已在后端登录接口中自动设置为 online，无需前端再次设置
+    logger.debug('✅ 用户登录成功，状态: ${user['status']}');
+
+    // 🔵 阶段6：离线消息改由 Agora Chat 投递，不再清除后端同步记账记录。
+
+    // 🔴 登录成功后清除所有本地缓存
+    logger.info('🗑️ 登录成功，开始清除所有本地缓存...');
+    MobileChatPage.clearAllCache();
+    MobileContactsPage.clearAllCache();
+    MobileHomePage.clearAllCache();
+
+    // 🔴 清除Flutter图片缓存（避免切换账号后显示旧头像）
+    PaintingBinding.instance.imageCache.clear();
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    logger.info('🖼️ Flutter图片缓存已清除');
+
+    logger.info('✅ 所有本地缓存已清除，即将重新加载数据');
+
+    if (!mounted) return;
+    _showSuccess('登录成功');
+
+    // 跳转到主页
+    Navigator.pushReplacementNamed(context, '/home');
+  }
+
+  // ==================== PC端扫码登录 ====================
+
+  /// 创建扫码登录会话并开始轮询
+  Future<void> _createQRLoginSession() async {
+    _qrPollTimer?.cancel();
+    setState(() {
+      _qrStatus = 'loading';
+      _qrId = null;
+      _scannedNickname = '';
+    });
+
+    try {
+      final result = await ApiService.createQRLoginSession();
+      if (!mounted) return;
+
+      if (result['code'] == 0 && result['data']?['qr_id'] != null) {
+        setState(() {
+          _qrId = result['data']['qr_id'];
+          _qrStatus = 'pending';
+        });
+        _startQRPolling();
+      } else {
+        setState(() => _qrStatus = 'error');
+      }
+    } catch (e) {
+      logger.debug('❌ [扫码登录] 创建二维码失败: $e');
+      if (mounted) {
+        setState(() => _qrStatus = 'error');
+      }
+    }
+  }
+
+  void _startQRPolling() {
+    _qrPollTimer?.cancel();
+    _qrPollTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _pollQRLoginStatus(),
+    );
+  }
+
+  /// 轮询二维码状态；确认登录后走公共登录流程
+  Future<void> _pollQRLoginStatus() async {
+    final qrId = _qrId;
+    if (qrId == null || _isLoading) return;
+
+    try {
+      final result = await ApiService.getQRLoginStatus(qrId);
+      // 页面已销毁或二维码已刷新，丢弃本次结果
+      if (!mounted || qrId != _qrId) return;
+      if (result['code'] != 0) return;
+
+      final data = result['data'];
+      final status = data?['status'] as String? ?? '';
+      switch (status) {
+        case 'scanned':
+          if (_qrStatus != 'scanned') {
+            setState(() {
+              _qrStatus = 'scanned';
+              _scannedNickname = data?['user']?['nickname'] ?? '';
+            });
+          }
+          break;
+        case 'confirmed':
+          _qrPollTimer?.cancel();
+          setState(() => _isLoading = true);
+          logger.info('✅ [扫码登录] 手机已确认，完成PC端登录');
+          await _completeLogin(data['token'], data['user']);
+          break;
+        case 'cancelled':
+          _qrPollTimer?.cancel();
+          setState(() => _qrStatus = 'cancelled');
+          break;
+        case 'expired':
+          _qrPollTimer?.cancel();
+          setState(() => _qrStatus = 'expired');
+          break;
+        default:
+          break; // pending：继续等待
+      }
+    } catch (e) {
+      logger.debug('⚠️ [扫码登录] 轮询状态失败: $e');
     }
   }
 
@@ -347,6 +444,7 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   void dispose() {
+    _qrPollTimer?.cancel();
     _accountController.removeListener(_checkCanLogin);
     _passwordController.removeListener(_checkCanLogin);
     _accountController.dispose();
@@ -397,7 +495,7 @@ class _LoginPageState extends State<LoginPage> {
             height: double.infinity,
             decoration: const BoxDecoration(
               image: DecorationImage(
-                image: AssetImage('assets/登录/背景图.png'),
+                image: AssetImage('assets/登录/背景图.jpg'),
                 fit: BoxFit.cover,
               ),
             ),
@@ -682,10 +780,10 @@ class _LoginPageState extends State<LoginPage> {
                 ],
               ),
             ),
-            // 表单内容
+            // 🔴 PC端只允许扫码登录：展示二维码，由手机APP扫一扫确认
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 30),
-              child: _buildAccountLoginForm(),
+              child: _buildQRLoginView(),
             ),
           ],
         ),
@@ -693,338 +791,197 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  // 账号登录表单
-  Widget _buildAccountLoginForm() {
+  // ==================== PC端扫码登录视图 ====================
+
+  Widget _buildQRLoginView() {
+    final c = AppColors.of(context);
     final l10n = AppLocalizations.of(context);
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 30),
-        // 账号输入框（支持用户名或邮箱）
-        _buildInputField(
-          label: l10n.translate('account'),
-          controller: _accountController,
-          hintText: '请输入用户名/邮箱',
-        ),
-        const SizedBox(height: 20),
-        // 密码输入框
-        _buildPasswordField(),
-        const SizedBox(height: 20),
-        // 只在PC端显示"记住密码"和"下次自动登录"选项
-        if (_isDesktop) ...[
-          _buildCheckboxRow(),
-          const SizedBox(height: 16),
-        ] else ...[
-          const SizedBox(height: 16), // 移动端间距
-        ],
-        const SizedBox(height: 32),
-        // 登录按钮
-        _buildLoginButton(),
-        const SizedBox(height: 20),
-        // 忘记密码
-        _buildForgotPassword(),
-        const SizedBox(height: 38),
-      ],
-    );
-  }
-
-  Widget _buildInputField({
-    required String label,
-    required TextEditingController controller,
-    required String hintText,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: _labelStyle(context)),
-        const SizedBox(height: 8),
-        Container(
-          height: 42,
-          decoration: BoxDecoration(
-            color: AppColors.of(context).inputField,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: TextField(
-            controller: controller,
-            textAlignVertical: TextAlignVertical.center,
-            decoration: InputDecoration(
-              hintText: hintText,
-              hintStyle: TextStyle(
-                color: AppColors.of(context).secondaryText,
-                fontSize: 14,
-              ),
-              border: InputBorder.none,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 11,
-              ),
-            ),
+        const SizedBox(height: 6),
+        Text(
+          '扫码登录',
+          style: TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            color: c.primaryText,
           ),
         ),
-      ],
-    );
-  }
-
-  Widget _buildPasswordField() {
-    final l10n = AppLocalizations.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(l10n.translate('password'), style: _labelStyle(context)),
-        const SizedBox(height: 8),
-        Container(
-          height: 42,
-          decoration: BoxDecoration(
-            color: AppColors.of(context).inputField,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: TextField(
-            controller: _passwordController,
-            obscureText: _obscurePassword,
-            textAlignVertical: TextAlignVertical.center,
-            onSubmitted: (_) {
-              // 按下 Enter 键时，如果可以登录则执行登录
-              if (_canLogin) {
-                _handleAccountLogin();
-              }
-            },
-            decoration: InputDecoration(
-              hintText: l10n.translate('password'),
-              hintStyle: TextStyle(
-                color: AppColors.of(context).secondaryText,
-                fontSize: 14,
-              ),
-              border: InputBorder.none,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 11,
-              ),
-              suffixIcon: IconButton(
-                icon: Icon(
-                  _obscurePassword ? Icons.visibility_off : Icons.visibility,
-                  color: AppColors.of(context).secondaryText,
-                  size: 20,
-                ),
-                onPressed: () {
-                  setState(() {
-                    _obscurePassword = !_obscurePassword;
-                  });
-                },
-              ),
-            ),
-          ),
+        const SizedBox(height: 10),
+        Text(
+          '请使用手机APP的"扫一扫"扫描二维码',
+          style: TextStyle(fontSize: 13, color: c.secondaryText),
         ),
-      ],
-    );
-  }
-
-  // PC端复选框相关的UI组件
-  Widget _buildCheckboxRow() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        _buildAutoLoginCheckbox(),
-        _buildRememberPasswordCheckbox(),
-      ],
-    );
-  }
-
-  Widget _buildRememberPasswordCheckbox() {
-    final l10n = AppLocalizations.of(context);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: 18,
-          height: 18,
-          child: Checkbox(
-            value: _rememberPassword,
-            onChanged: (value) {
-              setState(() {
-                _rememberPassword = value ?? false;
-                // 如果取消记住密码，也要取消自动登录
-                if (!_rememberPassword) {
-                  _autoLogin = false;
-                }
-              });
-            },
-            activeColor: const Color(0xFF4A90E2),
-            checkColor: Colors.white,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-        ),
-        const SizedBox(width: 8),
-        GestureDetector(
-          onTap: () {
-            setState(() {
-              _rememberPassword = !_rememberPassword;
-              // 如果取消记住密码，也要取消自动登录
-              if (!_rememberPassword) {
-                _autoLogin = false;
-              }
-            });
-          },
-          child: Text(
-            l10n.translate('remember_password'),
-            style: TextStyle(
-              fontSize: 14,
-              color: AppColors.of(context).secondaryText,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildAutoLoginCheckbox() {
-    final l10n = AppLocalizations.of(context);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: 18,
-          height: 18,
-          child: Checkbox(
-            value: _autoLogin,
-            onChanged: _rememberPassword ? (value) {
-              setState(() {
-                _autoLogin = value ?? false;
-              });
-            } : null, // 只有记住密码时才能勾选自动登录
-            activeColor: const Color(0xFF4A90E2),
-            checkColor: Colors.white,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-        ),
-        const SizedBox(width: 8),
-        GestureDetector(
-          onTap: _rememberPassword ? () {
-            setState(() {
-              _autoLogin = !_autoLogin;
-            });
-          } : null,
-          child: Text(
-            l10n.translate('auto_login_next_time'),
-            style: TextStyle(
-              fontSize: 14,
-              color: _rememberPassword
-                  ? AppColors.of(context).secondaryText
-                  : AppColors.of(context).divider,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildForgotPassword() {
-    final l10n = AppLocalizations.of(context);
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
+        const SizedBox(height: 28),
+        Center(child: _buildQRCodeArea()),
+        const SizedBox(height: 24),
+        _buildQRStatusHint(),
+        const SizedBox(height: 12),
+        // 注册入口（注册完成后回到本页用手机APP扫码登录）
         TextButton(
           onPressed: () {
             Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (context) => const ForgotPasswordPage(),
+                builder: (context) => const RegisterPage(),
               ),
             );
           },
-          style: TextButton.styleFrom(
-            padding: EdgeInsets.zero,
-            minimumSize: const Size(0, 0),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          child: Text(
-            l10n.translate('forgot_password_question'),
-            style: TextStyle(
-              fontSize: 13,
-              color: AppColors.of(context).secondaryText,
-            ),
-          ),
-        ),
-        const SizedBox(width: 20),
-        TextButton(
-          onPressed: () {
-            Navigator.of(context).push(
-              MaterialPageRoute(builder: (context) => const RegisterPage()),
-            );
-          },
-          style: TextButton.styleFrom(
-            padding: EdgeInsets.zero,
-            minimumSize: const Size(0, 0),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
           child: Text(
             l10n.translate('go_to_register'),
             style: const TextStyle(
-              fontSize: 13,
+              fontSize: 14,
               color: Color(0xFF4A90E2),
-              decoration: TextDecoration.underline,
-              decorationColor: Color(0xFF4A90E2),
+              fontWeight: FontWeight.w500,
             ),
           ),
         ),
+        const SizedBox(height: 18),
       ],
     );
   }
 
-  Widget _buildLoginButton() {
-    final l10n = AppLocalizations.of(context);
-    return SizedBox(
-      width: double.infinity,
-      height: 42,
-      child: ElevatedButton(
-        onPressed: (_canLogin && !_isLoading)
-            ? () {
-                _handleAccountLogin();
-              }
-            : null,
-        style: ButtonStyle(
-          backgroundColor: WidgetStateProperty.resolveWith<Color>((
-            Set<WidgetState> states,
-          ) {
-            if (states.contains(WidgetState.disabled)) {
-              return const Color(0xFFE5E5E5);
-            }
-            // 加载状态时显示较深的灰色
-            if (_isLoading) {
-              return const Color(0xFF9E9E9E);
-            }
-            return const Color(0xFF4A90E2);
-          }),
-          foregroundColor: WidgetStateProperty.all(const Color(0xFFFFFFFF)),
-          shape: WidgetStateProperty.all(
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-          ),
-          elevation: WidgetStateProperty.all(0),
+  // 二维码区域：白底二维码 + 状态遮罩（扫描成功/失效刷新/加载中）
+  Widget _buildQRCodeArea() {
+    const double size = 220;
+
+    Widget content;
+    if (_qrId != null) {
+      content = Container(
+        color: Colors.white,
+        padding: const EdgeInsets.all(10),
+        child: QrImageView(
+          data: 'youdu://qrlogin/$_qrId',
+          version: QrVersions.auto,
+          size: size - 20,
+          backgroundColor: Colors.white,
         ),
-        child: _isLoading
-            ? Row(
+      );
+    } else {
+      content = Container(color: Colors.white);
+    }
+
+    Widget? overlay;
+    if (_isLoading) {
+      // 手机已确认，正在完成登录
+      overlay = _buildQROverlay(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(
+              width: 32,
+              height: 32,
+              child: CircularProgressIndicator(strokeWidth: 3),
+            ),
+            const SizedBox(height: 12),
+            Text('登录中...', style: TextStyle(fontSize: 14, color: Colors.grey[800])),
+          ],
+        ),
+      );
+    } else {
+      switch (_qrStatus) {
+        case 'loading':
+          overlay = _buildQROverlay(
+            child: const Center(
+              child: SizedBox(
+                width: 32,
+                height: 32,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+            ),
+          );
+          break;
+        case 'scanned':
+          overlay = _buildQROverlay(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.check_circle, color: Color(0xFF07C160), size: 44),
+                const SizedBox(height: 12),
+                Text(
+                  _scannedNickname.isNotEmpty ? '$_scannedNickname 扫描成功' : '扫描成功',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.grey[800],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '请在手机上确认登录',
+                  style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+          );
+          break;
+        case 'cancelled':
+        case 'expired':
+        case 'error':
+          final tip = _qrStatus == 'cancelled'
+              ? '已取消登录'
+              : (_qrStatus == 'error' ? '二维码生成失败' : '二维码已失效');
+          overlay = GestureDetector(
+            onTap: _createQRLoginSession,
+            child: _buildQROverlay(
+              child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      color: Colors.white,
-                      strokeWidth: 2,
+                  const Icon(Icons.refresh, color: Color(0xFF4A90E2), size: 44),
+                  const SizedBox(height: 12),
+                  Text(
+                    tip,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.grey[800],
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(height: 6),
                   Text(
-                    '${l10n.translate('login')}...',
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                    '点击刷新二维码',
+                    style: TextStyle(fontSize: 13, color: Colors.grey[600]),
                   ),
                 ],
-              )
-            : Text(
-                l10n.translate('login'),
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
               ),
+            ),
+          );
+          break;
+      }
+    }
+
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.of(context).divider),
       ),
+      clipBehavior: Clip.hardEdge,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          content,
+          if (overlay != null) overlay,
+        ],
+      ),
+    );
+  }
+
+  // 二维码状态遮罩底板
+  Widget _buildQROverlay({required Widget child}) {
+    return Container(
+      color: Colors.white.withValues(alpha: 0.96),
+      child: child,
+    );
+  }
+
+  // 二维码下方的操作提示
+  Widget _buildQRStatusHint() {
+    final c = AppColors.of(context);
+    return Text(
+      '打开手机APP → 首页右上角"+" → 扫一扫',
+      textAlign: TextAlign.center,
+      style: TextStyle(fontSize: 13, color: c.secondaryText),
     );
   }
 

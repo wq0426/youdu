@@ -63,6 +63,10 @@ class DesktopAgoraChatBridge {
   void Function()? onTokenWillExpire;
   void Function()? onTokenExpired;
 
+  /// 🔴 WebView 的 WebContent 进程死亡(被系统终止/挂起后无法恢复)。
+  /// JS 冻结时 Web SDK 连 onDisconnected 都发不出来,上层必须整体重建 WebView。
+  void Function()? onProcessDied;
+
   bool get isRunning => _webView != null;
 
   // ==================== 生命周期 ====================
@@ -149,6 +153,13 @@ class DesktopAgoraChatBridge {
         },
         onReceivedError: (controller, request, error) {
           logger.error('💬 [ChatBridge] 页面加载错误: ${error.description}');
+        },
+        // 🔴 macOS/iOS: WKWebView 的 JS 跑在独立的 WebContent 进程里,
+        // 被系统杀掉时本进程无任何异常,Web SDK 也发不出 onDisconnected,
+        // 只有这个回调能感知,必须通知上层重建
+        onWebContentProcessDidTerminate: (controller) {
+          logger.error('💬 [ChatBridge] WebContent 进程已终止,桥接失效');
+          onProcessDied?.call();
         },
       );
       await _webView!.run();
@@ -280,6 +291,22 @@ class DesktopAgoraChatBridge {
   }
 
   // ==================== 对上层暴露的操作 ====================
+
+  /// 存活探测:同步 eval 一个常量表达式。
+  /// WebContent 进程被挂起时 evaluateJavascript 永远不返回(靠 timeout 判死),
+  /// 被终止时抛异常/返回 null —— 任一情况都视为桥接已死。
+  Future<bool> ping({Duration timeout = const Duration(seconds: 8)}) async {
+    final controller = _controller;
+    if (controller == null) return false;
+    try {
+      final r = await controller
+          .evaluateJavascript(source: 'window.acbridge ? 1 : 0')
+          .timeout(timeout);
+      return r == 1 || r == '1';
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// 🧪 调试用：在桥接页面里执行任意 JS 并返回结果（仅诊断用途）
   Future<dynamic> debugEval(String source) async {

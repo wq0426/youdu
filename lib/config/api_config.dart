@@ -86,6 +86,12 @@ class ApiConfig {
   static const String authVerifyCodeSend = '/api/auth/verify-code/send';
   static const String authVerifyCodeLogin = '/api/auth/verify-code/login';
   static const String authForgotPassword = '/api/auth/forgot-password';
+  // PC端扫码登录
+  static const String authQRCodeCreate = '/api/auth/qrcode/create';
+  static const String authQRCodeStatus = '/api/auth/qrcode/status';
+  static const String authQRCodeScan = '/api/auth/qrcode/scan';
+  static const String authQRCodeConfirm = '/api/auth/qrcode/confirm';
+  static const String authQRCodeCancel = '/api/auth/qrcode/cancel';
   static const String configServer = '/api/config/server';
   static const String user = '/api/user';
   static const String userProfile = '/api/user/profile';

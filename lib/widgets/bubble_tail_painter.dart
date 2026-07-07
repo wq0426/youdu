@@ -19,18 +19,21 @@ class BubbleTailPainter extends CustomPainter {
 
     final path = Path();
     if (isMe) {
-      // 尾巴在右侧，尖端在右下角
+      // 尾巴在右侧，尖端在右下角；控制点靠内靠上让曲线更早外扫，尾巴更明显
       path.moveTo(0, 0);
-      path.quadraticBezierTo(w * 0.28, h * 0.78, w, h);
+      path.quadraticBezierTo(w * 0.18, h * 0.62, w, h);
       path.quadraticBezierTo(w * 0.45, h, 0, h);
       path.close();
     } else {
       // 尾巴在左侧，尖端在左下角
       path.moveTo(w, 0);
-      path.quadraticBezierTo(w * 0.72, h * 0.78, 0, h);
+      path.quadraticBezierTo(w * 0.82, h * 0.62, 0, h);
       path.quadraticBezierTo(w * 0.55, h, w, h);
       path.close();
     }
+    // 与气泡 boxShadow 同级的细阴影，低对比背景（如浅绿气泡配浅灰背景）下
+    // 也能衬出尖嘴轮廓；被气泡覆盖的部分会被气泡本体盖住，不影响观感
+    canvas.drawShadow(path, const Color(0x55000000), 1.5, false);
     canvas.drawPath(path, paint);
   }
 

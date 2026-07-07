@@ -42,6 +42,7 @@ func SetupRouter(hub *ws.Hub, telegramDB *sql.DB) (*gin.Engine, *controllers.Cal
 	scheduledMsgCtrl := controllers.NewScheduledMessageController()
 	chatCtrl := controllers.NewChatController()
 	messageSyncCtrl := controllers.NewMessageSyncController()
+	qrLoginCtrl := controllers.NewQRLoginController(hub)
 
 	// 设置OSSController的数据库连接
 	ossCtrl.SetDB(telegramDB)
@@ -60,6 +61,8 @@ func SetupRouter(hub *ws.Hub, telegramDB *sql.DB) (*gin.Engine, *controllers.Cal
 			auth.POST("/verify-code/send", authCtrl.SendVerificationCode) // 发送验证码
 			auth.POST("/verify-code/login", authCtrl.VerifyCodeLogin)     // 验证码登录
 			auth.POST("/forgot-password", authCtrl.ForgotPassword)        // 忘记密码
+			auth.POST("/qrcode/create", qrLoginCtrl.Create)               // PC端创建扫码登录会话
+			auth.GET("/qrcode/status", qrLoginCtrl.Status)                // PC端轮询扫码登录状态
 		}
 
 		// 配置相关路由
@@ -108,6 +111,14 @@ func SetupRouter(hub *ws.Hub, telegramDB *sql.DB) (*gin.Engine, *controllers.Cal
 		authorized := api.Group("")
 		authorized.Use(middleware.AuthMiddleware())
 		{
+			// PC端扫码登录（手机端操作，需登录）
+			qrLogin := authorized.Group("/auth/qrcode")
+			{
+				qrLogin.POST("/scan", qrLoginCtrl.Scan)       // 手机扫描二维码
+				qrLogin.POST("/confirm", qrLoginCtrl.Confirm) // 手机确认PC端登录
+				qrLogin.POST("/cancel", qrLoginCtrl.Cancel)   // 手机取消PC端登录
+			}
+
 			// 文件上传相关路由
 			upload := authorized.Group("/upload")
 			{
@@ -143,6 +154,7 @@ func SetupRouter(hub *ws.Hub, telegramDB *sql.DB) (*gin.Engine, *controllers.Cal
 				user.POST("/batch-online-status", userCtrl.BatchGetOnlineStatus) // 批量获取用户在线状态
 				user.POST("/batch-call-status", userCtrl.BatchGetCallStatus)     // 批量获取用户通话状态（是否占线）
 				user.POST("/call-status", userCtrl.UpdateCallStatus)             // 更新当前用户的通话状态
+				user.GET("/search", userCtrl.SearchUsers)                        // 全站模糊搜索用户（搜索全平台账户）
 				user.GET("/:id", userCtrl.GetUserByID)                           // 根据ID查询用户信息（动态路由放最后）
 			}
 
@@ -165,7 +177,9 @@ func SetupRouter(hub *ws.Hub, telegramDB *sql.DB) (*gin.Engine, *controllers.Cal
 			// 联系人相关路由
 			contact := authorized.Group("/contacts")
 			{
-				contact.POST("", contactCtrl.AddContact)                                       // 添加联系人
+				contact.POST("", contactCtrl.AddContact)                                       // 添加联系人（发申请，需对方审批）
+				contact.POST("/direct", contactCtrl.AddContactDirect)                          // 直接添加联系人（免审批）
+				contact.GET("/relation/:friend_id", contactCtrl.GetContactRelation)            // 查询与指定用户的关系状态
 				contact.GET("", contactCtrl.GetContacts)                                       // 获取联系人列表
 				contact.GET("/requests", contactCtrl.GetPendingContactRequests)                // 获取待审核的联系人申请
 				contact.GET("/search", contactCtrl.SearchContacts)                             // 搜索联系人

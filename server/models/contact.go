@@ -15,6 +15,7 @@ type UserRelation struct {
 	BlockedByUserID *int      `json:"blocked_by_user_id"` // 拉黑操作人ID
 	IsDeleted       bool      `json:"is_deleted"`         // 是否被删除（软删除）
 	DeletedByUserID *int      `json:"deleted_by_user_id"` // 删除操作人ID
+	FriendAdded     bool      `json:"friend_added"`       // 被加方是否也添加了发起方（单向可见：false 时关系不出现在被加方列表）
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -78,7 +79,7 @@ func (r *ContactRepository) CheckRelationExists(userID, friendID int) (bool, err
 // GetRelationByUsers 获取两个用户之间的关系详情
 func (r *ContactRepository) GetRelationByUsers(userID, friendID int) (*UserRelation, error) {
 	query := `
-		SELECT id, user_id, friend_id, approval_status, COALESCE(is_deleted, false), created_at
+		SELECT id, user_id, friend_id, approval_status, COALESCE(is_deleted, false), COALESCE(friend_added, false), created_at
 		FROM user_relations
 		WHERE (user_id = $1 AND friend_id = $2)
 		   OR (user_id = $2 AND friend_id = $1)
@@ -92,6 +93,7 @@ func (r *ContactRepository) GetRelationByUsers(userID, friendID int) (*UserRelat
 		&relation.FriendID,
 		&relation.ApprovalStatus,
 		&relation.IsDeleted,
+		&relation.FriendAdded,
 		&relation.CreatedAt,
 	)
 
@@ -195,7 +197,8 @@ func (r *ContactRepository) GetContactsByUserID(userID int) ([]ContactInfo, erro
 		WHERE (
 			(ur1.approval_status = 'approved' AND COALESCE(ur1.is_deleted, false) = false)
 			OR
-			(ur2.approval_status = 'approved' AND COALESCE(ur2.is_deleted, false) = false)
+			-- 单向可见：对方发起的关系，仅当我也回加了对方(friend_added)才出现在我的列表
+			(ur2.approval_status = 'approved' AND COALESCE(ur2.is_deleted, false) = false AND COALESCE(ur2.friend_added, false) = true)
 			OR
 			-- 当前用户发起的、还在等待对方审核的好友请求（发起方需要在"新联系人"中看到等待验证状态）
 			(ur1.approval_status = 'pending' AND COALESCE(ur1.is_deleted, false) = false)
@@ -360,14 +363,16 @@ func (r *ContactRepository) SearchContacts(userID int, keyword string) ([]Search
 	// 此处不再 JOIN messages 表；last_message 返回空串，排序退化为按用户创建时间。
 	query := `
 		WITH user_contacts AS (
-			-- 获取用户的所有已通过审核的联系人（双向关系）
+			-- 获取用户的所有已通过审核的联系人
+			-- 单向可见：我发起的关系直接可见；对方发起的关系需我已回加(friend_added)
 			SELECT DISTINCT
 				CASE
 					WHEN user_id = $1 THEN friend_id
 					ELSE user_id
 				END as contact_id
 			FROM user_relations
-			WHERE (user_id = $1 OR friend_id = $1) AND approval_status = 'approved'
+			WHERE (user_id = $1 OR (friend_id = $1 AND COALESCE(friend_added, false) = true))
+			  AND approval_status = 'approved'
 		)
 		SELECT
 			u.id as user_id,
@@ -782,4 +787,53 @@ func (r *ContactRepository) CheckContactApprovalStatus(senderID, receiverID int)
 	}
 
 	return approvalStatus, nil
+}
+
+// AddContactApproved 直接添加联系人（免审批，approval_status 直接置为 approved）
+// 用于"全平台搜索后一键添加联系人"场景
+func (r *ContactRepository) AddContactApproved(userID, friendID int) (*UserRelation, error) {
+	query := `
+		INSERT INTO user_relations (user_id, friend_id, approval_status)
+		VALUES ($1, $2, 'approved')
+		RETURNING id, user_id, friend_id, approval_status, created_at
+	`
+
+	relation := &UserRelation{}
+	err := r.DB.QueryRow(query, userID, friendID).Scan(
+		&relation.ID,
+		&relation.UserID,
+		&relation.FriendID,
+		&relation.ApprovalStatus,
+		&relation.CreatedAt,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return relation, nil
+}
+
+// SetFriendAdded 标记被加方已回加发起方（单向可见 → 双向可见）
+func (r *ContactRepository) SetFriendAdded(relationID int) error {
+	query := `
+		UPDATE user_relations
+		SET friend_added = true
+		WHERE id = $1
+	`
+
+	_, err := r.DB.Exec(query, relationID)
+	return err
+}
+
+// RestoreRelationApproved 恢复已删除的关系并直接置为 approved（免审批直加场景）
+func (r *ContactRepository) RestoreRelationApproved(relationID int) error {
+	query := `
+		UPDATE user_relations
+		SET is_deleted = false, deleted_by_user_id = NULL, approval_status = 'approved', created_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+
+	_, err := r.DB.Exec(query, relationID)
+	return err
 }

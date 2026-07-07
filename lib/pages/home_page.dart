@@ -20,6 +20,7 @@ import 'package:chewie/chewie.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:intl/intl.dart';
 import '../widgets/user_profile_menu_with_api.dart';
 import '../widgets/user_info_dialog_simple.dart';
 import '../widgets/edit_profile_dialog.dart';
@@ -49,6 +50,7 @@ import '../models/online_notification_model.dart';
 import '../widgets/create_group_dialog.dart';
 import '../widgets/bubble_tail_painter.dart';
 import 'mobile_contacts_page.dart';
+import 'mobile_chat_page.dart'; // PC端复用其静态消息缓存，会话切换免加载秒开
 import '../widgets/settings_dialog.dart';
 import '../widgets/mention_member_picker.dart';
 import '../widgets/group_call_member_picker.dart';
@@ -95,7 +97,7 @@ class DesktopHomePage extends StatefulWidget {
 }
 
 class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
-  int _selectedMenuIndex = 0; // 0: 消息, 1: 通讯录, 2: 资讯, 3: 待办
+  int _selectedMenuIndex = 0; // 0: 消息, 1: 联系人, 3: 待办（2 原为资讯，已移除）
   int _selectedChatIndex = 0; // 当前选中的对话（已废弃，保留用于兼容）
   String? _selectedChatKey; // 当前选中的会话唯一标识（user_123 或 group_456）
   int _selectedContactIndex = -1; // 当前选中的联系人分组，-1表示未选择
@@ -115,6 +117,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   StreamSubscription<List<ChatMessage>>? _agoraReadSubscription; // 阶段4：已读回执
   StreamSubscription<List<ChatMessage>>? _agoraCmdSubscription; // 阶段4：正在输入
   StreamSubscription<String>? _agoraConvReadSubscription; // 会话已读回执（对端读完整个会话）
+  StreamSubscription<bool>? _agoraConnSubscription; // Agora 连接状态(断线恢复后补拉)
+  bool? _agoraChatConnected; // Agora 连接状态缓存;null=尚未收到过连接事件
   // 条件初始化 Agora 服务（替代 WebRTC）
   late final AgoraService? _agoraService = FeatureConfig.enableWebRTC
       ? AgoraService()
@@ -205,6 +209,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   List<RecentContactModel> _searchResults = []; // 搜索结果列表
   bool _isSearching = false; // 是否正在搜索
   String? _searchError; // 搜索错误信息
+  List<Map<String, dynamic>> _globalUserSearchResults = []; // 全平台用户搜索结果（可直接聊天/一键添加联系人）
+  // 当前单聊对象是否为联系人（null=未知/查询中），为 false 时聊天头部显示"添加为联系人"横幅
+  bool? _currentChatIsFriend;
+  bool _isAddingContactFromBanner = false; // 横幅"添加为联系人"请求进行中
 
   // 通讯录搜索相关状态
   final TextEditingController _contactSearchController = TextEditingController(); // 通讯录搜索框控制器
@@ -215,6 +223,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   bool _isLoadingMessages = false; // 是否正在加载消息
   String? _messagesError; // 消息加载错误信息
   bool _isScrollingToBottom = false; // 是否正在滚动到底部（用于隐藏消息避免闪烁）
+  // 🔵 _messages 当前实际归属的会话缓存key。切会话是异步加载，加载失败/未完成时
+  // _messages 里还是上一个会话的内容，写缓存必须以此为准，否则会串会话。
+  String? _messagesOwnerKey;
   int? _currentChatUserId; // 当前聊天的用户ID或群组ID
   bool _isCurrentChatGroup = false; // 当前聊天是否为群组
   final Set<int> _removedGroupIds = {}; // 已被移除的群组ID集合
@@ -621,6 +632,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     _agoraReadSubscription?.cancel(); // 阶段4
     _agoraCmdSubscription?.cancel(); // 阶段4
     _agoraConvReadSubscription?.cancel();
+    _agoraConnSubscription?.cancel();
     _wsService.disconnect();
     // 停止响铃和震动
     _stopRingtone();
@@ -1013,6 +1025,12 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       _agoraConvReadSubscription = AgoraChatService()
           .conversationReadStream
           .listen(_handleAgoraConversationRead);
+      // Agora 连接状态:断线恢复(含启动时断网、之后看门狗重登录成功)后补拉,
+      // 否则断线期间的消息只能等对方再发新消息才可见
+      _agoraConnSubscription?.cancel();
+      _agoraConnSubscription = AgoraChatService()
+          .connectionStream
+          .listen(_handleAgoraConnectionChanged);
 
       // 连接成功后，发送在线状态
       try {
@@ -3642,6 +3660,31 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     });
   }
 
+  /// Agora Chat 连接状态变化：断线恢复后补拉数据。
+  /// 断线期间的消息虽然重登录后服务端会自动下发,但会话列表预览/未读数以及
+  /// 当前打开聊天窗口里的历史仍可能缺失(如下发有上限、页面渲染时序),
+  /// 与 WS onReconnected 同款兜底:重拉会话列表 + 当前聊天记录(Agora 漫游)。
+  void _handleAgoraConnectionChanged(bool connected) {
+    if (!mounted) return;
+    final prev = _agoraChatConnected;
+    _agoraChatConnected = connected;
+    if (!connected) {
+      logger.debug('📴 [AgoraChat] 连接断开,等待自动重连/重登录');
+      return;
+    }
+    // 重复的 connected 事件(状态未变)不重复补拉
+    if (prev == true) return;
+    logger.debug('🔄 [AgoraChat] 连接恢复(prev=$prev),开始补拉会话列表和当前聊天记录');
+    // 清除已读状态缓存,让断线期间产生的未读数能正确显示(同 WS 重连逻辑)
+    _markedAsReadContacts.clear();
+    if (!_isLoadingRecentContacts) {
+      _loadRecentContacts();
+    }
+    if (_currentChatUserId != null && !_isLoadingMessages) {
+      _loadMessageHistory(_currentChatUserId!, isGroup: _isCurrentChatGroup);
+    }
+  }
+
   // 处理WebSocket消息
   /// 处理 Agora Chat 收到的消息（阶段1：1对1；阶段3：群聊）
   void _handleAgoraChatMessages(List<ChatMessage> messages) {
@@ -3651,7 +3694,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     for (final chatMsg in messages) {
       bool belongsToCurrentChat;
       if (chatMsg.chatType == ChatType.Chat) {
-        final peerId = int.tryParse(chatMsg.from ?? '') ?? 0;
+        // 多端同步：自己在其他端发出的消息以 from=自己 回流，会话对端取 to
+        final isEcho = chatMsg.from == AgoraChatService().currentUsername;
+        final peerId =
+            int.tryParse((isEcho ? chatMsg.to : chatMsg.from) ?? '') ?? 0;
         belongsToCurrentChat =
             !_isCurrentChatGroup && _currentChatUserId == peerId;
       } else if (chatMsg.chatType == ChatType.GroupChat) {
@@ -3692,7 +3738,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       );
       if (exists) continue;
 
-      _messages.add(model);
+      _insertMessageInOrder(model);
       changed = true;
       // 当前会话：同步更新左侧列表的最后消息预览（不加未读，用户正在查看）
       _patchRecentContactWithMessage(chatMsg, incrementUnread: false);
@@ -3702,6 +3748,18 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       setState(() {});
       _scrollToBottom();
     }
+  }
+
+  /// 按时间顺序插入收到的消息（_messages 为旧→新升序）。
+  /// 🔴 离线补发/漫游同步的消息可能比本端已上屏的消息"晚到但时间更早"，
+  /// 直接 append 会把更早的消息排到列表末尾，这里从尾部向前找到正确位置插入。
+  /// 时间相同（含同一秒）时插在后面，保持到达顺序稳定。
+  void _insertMessageInOrder(MessageModel model) {
+    int i = _messages.length;
+    while (i > 0 && _messages[i - 1].createdAt.isAfter(model.createdAt)) {
+      i--;
+    }
+    _messages.insert(i, model);
   }
 
   /// 🔵 收到 Agora 消息时原地更新会话列表（最后消息预览/时间/未读/@我），
@@ -3718,6 +3776,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         return;
       }
 
+      // 多端同步：自己在其他端发的消息回流时 sender=自己，
+      // 1v1 会话对端要取 receiverId，且不加未读、预览标记为"我发的"
+      final isOutgoing = model.senderId == _currentUserId;
+      final addUnread = incrementUnread && !isOutgoing;
+
       final isGroup = chatMsg.chatType == ChatType.GroupChat;
       int contactId;
       if (isGroup) {
@@ -3732,7 +3795,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
         contactId = mapped;
       } else {
-        contactId = int.tryParse(chatMsg.from ?? '') ?? 0;
+        contactId = isOutgoing ? model.receiverId : model.senderId;
       }
       if (contactId == 0) return;
 
@@ -3749,7 +3812,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           unawaited(_recoverUnknownUserConversation(
             contactId,
             chatMsg,
-            incrementUnread: incrementUnread,
+            incrementUnread: addUnread,
           ));
           return;
         }
@@ -3784,9 +3847,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           lastMessageTime: model.createdAt.toIso8601String(),
           // copyWith 传 null 会保留旧值，用空串覆盖可能残留的 'recalled' 状态
           lastMessageStatus: '',
-          lastMessageFromMe: false,
+          lastMessageFromMe: isOutgoing,
           lastMessageRead: false,
-          unreadCount: incrementUnread
+          unreadCount: addUnread
               ? _recentContacts[idx].unreadCount + 1
               : _recentContacts[idx].unreadCount,
           hasMentionedMe: mentionedMe ? true : null,
@@ -3984,7 +4047,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       // 🔧 UI 渲染读的是 _sortedRecentContacts 缓存，插入后必须重建缓存才可见
       _updateSortedRecentContacts();
     });
-    _playNewMessageSound();
+    // 多端回显(自己在其他端发的消息, incrementUnread=false)不播提示音
+    if (incrementUnread) _playNewMessageSound();
   }
 
   /// 阶段4：撤回——把对应消息标记为已撤回
@@ -4512,9 +4576,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           return;
         }
 
-        // 添加到消息列表
+        // 添加到消息列表（按时间顺序插入，避免晚到的旧消息排到末尾）
         setState(() {
-          _messages.add(newMessage);
+          _insertMessageInOrder(newMessage);
 
           // 同时更新最近联系人列表中的最后消息和最后消息时间
           final contactIndex = _recentContacts.indexWhere(
@@ -6793,6 +6857,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     if (keyword.trim().isEmpty) {
       setState(() {
         _searchResults = [];
+        _globalUserSearchResults = [];
         _searchError = null;
         _isSearching = false;
       });
@@ -6807,6 +6872,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       _searchError = null;
       // 立即清空之前的搜索结果，确保不显示旧数据
       _searchResults = [];
+      _globalUserSearchResults = [];
     });
 
     try {
@@ -6822,11 +6888,13 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         return;
       }
 
-      // 调用API搜索联系- 每次都从服务器获取最新数
-      final response = await ApiService.searchContacts(
-        token: token,
-        keyword: currentKeyword,
-      );
+      // 并行搜索：联系人/会话 + 全平台所有账户（陌生人可直接聊天、一键添加联系人）
+      final responses = await Future.wait([
+        ApiService.searchContacts(token: token, keyword: currentKeyword),
+        ApiService.searchAllUsers(token: token, keyword: currentKeyword),
+      ]);
+      final response = responses[0];
+      final globalResponse = responses[1];
 
       // 检查搜索关键词是否仍然匹配（用户可能已经输入了新的内容
       if (_searchController.text.trim() != currentKeyword) {
@@ -6843,8 +6911,19 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             )
             .toList();
 
+        // 全平台用户结果：排除已出现在联系人搜索结果中的用户，避免重复
+        final contactIds = contacts.map((c) => c.userId).toSet();
+        List<Map<String, dynamic>> globalUsers = [];
+        if (globalResponse['code'] == 0 && globalResponse['data'] != null) {
+          globalUsers = (globalResponse['data']['users'] as List? ?? [])
+              .whereType<Map<String, dynamic>>()
+              .where((u) => !contactIds.contains(u['user_id']))
+              .toList();
+        }
+
         setState(() {
           _searchResults = contacts;
+          _globalUserSearchResults = globalUsers;
           _isSearching = false;
         });
       } else {
@@ -6863,6 +6942,60 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       }
       logger.debug('搜索联系人失败 $e');
     }
+  }
+
+  /// 从全平台用户搜索结果直接打开聊天（无需是好友）
+  /// 若会话不存在则临时插入一条最近会话记录，与通讯录打开聊天的逻辑一致
+  Future<void> _openChatWithSearchedUser(Map<String, dynamic> user) async {
+    final userId = user['user_id'] is int
+        ? user['user_id'] as int
+        : int.tryParse(user['user_id']?.toString() ?? '') ?? 0;
+    if (userId <= 0) return;
+
+    final username = user['username']?.toString() ?? '';
+    final fullName = user['full_name']?.toString() ?? '';
+    final displayName = fullName.isNotEmpty ? fullName : username;
+    final avatar = user['avatar']?.toString();
+
+    logger.debug('🔍 从全平台搜索打开聊天: $displayName (ID: $userId)');
+
+    // 打开聊天前，先检查并移除删除标记（如果存在）
+    final contactKey = Storage.generateContactKey(isGroup: false, id: userId);
+    final isDeleted = await Storage.isChatDeletedForCurrentUser(contactKey);
+    if (isDeleted) {
+      await Storage.removeDeletedChatForCurrentUser(contactKey);
+    }
+
+    // 在最近联系人列表中查找该用户，不存在则临时插入
+    final contactIndex = _recentContacts.indexWhere(
+      (c) => !c.isGroup && c.userId == userId,
+    );
+
+    setState(() {
+      if (contactIndex == -1) {
+        _recentContacts.insert(
+          0,
+          RecentContactModel(
+            type: 'user',
+            userId: userId,
+            username: username,
+            fullName: displayName,
+            avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+            lastMessage: '',
+            lastMessageTime: DateTime.now().toIso8601String(),
+            unreadCount: 0,
+            status: user['status']?.toString() ?? 'offline',
+          ),
+        );
+        _updateSortedRecentContacts();
+      }
+      _selectedChatIndex = contactIndex == -1 ? 0 : contactIndex;
+      _selectedChatKey = contactKey;
+      _isCurrentChatGroup = false;
+    });
+
+    // 加载消息历史（内部会触发联系人关系检查，决定是否显示"添加为联系人"横幅）
+    _loadMessageHistory(userId, isGroup: false);
   }
 
   // 刷新当前聊天的消息列表
@@ -7068,7 +7201,21 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     return null;
   }
 
-  // 加载消息历史记录
+  /// 会话消息缓存key（与移动端 MobileChatPage._messageCache 共用同一套缓存与key格式）
+  String _chatCacheKey(int chatId, bool isGroup) {
+    if (chatId == 0) return 'file_assistant_$_currentUserId';
+    return isGroup ? 'group_$chatId' : 'user_${chatId}_$_currentUserId';
+  }
+
+  /// 切换会话前，把当前会话的消息快照写入缓存（含实时收发/翻页加载的消息），
+  /// 下次切回直接秒开，参考移动端 MobileChatPage 的缓存机制
+  void _snapshotMessagesToCache() {
+    final key = _messagesOwnerKey;
+    if (key == null) return;
+    MobileChatPage.setMessageCache(key, _messages);
+  }
+
+  // 加载消息历史记录（缓存优先：命中直接上屏不转圈，后台静默刷新最新数据）
   Future<void> _loadMessageHistory(
     int userId, {
     bool isGroup = false,
@@ -7081,8 +7228,26 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     _isUserScrolling = false;
     _lastScrollPosition = 0.0;
 
+    // 🔵 切走前把上一个会话的消息快照进缓存，下次切回免加载秒开
+    if (retryCount == 0) {
+      _snapshotMessagesToCache();
+    }
+
+    // 单聊时检查对方是否为联系人（非联系人时聊天头部显示"添加为联系人"横幅）
+    if (retryCount == 0) {
+      if (!isGroup && userId > 0) {
+        unawaited(_checkCurrentChatFriendStatus(userId));
+      } else {
+        _currentChatIsFriend = null;
+      }
+    }
+
+    final cacheKey = _chatCacheKey(userId, isGroup);
+    final cached = MobileChatPage.getMessageCache(cacheKey);
+    final hasCache = cached != null && cached.isNotEmpty;
+
     setState(() {
-      _isLoadingMessages = true;
+      _isLoadingMessages = !hasCache; // 🔵 缓存命中不转圈，直接展示缓存内容
       _messagesError = null;
       _currentChatUserId = userId;
       _isCurrentChatGroup = isGroup;
@@ -7091,7 +7256,22 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       if (!isGroup) {
         _currentUserGroupRole = null;
       }
+      if (hasCache) {
+        _messages = List.from(cached);
+        _messagesOwnerKey = cacheKey;
+        _isScrollingToBottom = true; // 先隐藏一帧，跳到底部后再显示，避免从顶部闪过
+      }
     });
+    if (hasCache) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_messageScrollController.hasClients) {
+          _messageScrollController
+              .jumpTo(_messageScrollController.position.maxScrollExtent);
+        }
+        setState(() => _isScrollingToBottom = false);
+      });
+    }
 
     try {
       final token = _token;
@@ -7129,6 +7309,15 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             .map((m) => AgoraChatService.chatMessageToModel(m))
             .toList();
       }
+
+      // 🔵 异步加载期间用户可能已切到其他会话：丢弃过期结果，避免消息串会话
+      if (!mounted ||
+          _currentChatUserId != userId ||
+          _isCurrentChatGroup != isGroup) {
+        logger.debug('⏭️ 已切换到其他会话，丢弃 $chatType $userId 的加载结果');
+        return;
+      }
+
       // 如果是群组，获取当前用户在群组中的角色
       if (isGroup) {
         try {
@@ -7151,9 +7340,13 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       // 设置消息并标记正在滚动到底部（隐藏消息列表避免闪烁）
       setState(() {
         _messages = messages;
+        _messagesOwnerKey = cacheKey;
         _isLoadingMessages = false; // 取消加载状态，让列表渲染
-        _isScrollingToBottom = true; // 标记正在滚动，隐藏消息
+        // 🔵 缓存已上屏时静默替换内容，不再隐藏列表（避免二次闪烁）
+        _isScrollingToBottom = !hasCache;
       });
+      // 🔵 最新结果写回缓存，供下次切回秒开
+      MobileChatPage.setMessageCache(cacheKey, messages);
 
       // 🔵 进入会话即发 Agora 会话已读回执（幂等，不依赖列表 unreadCount）：
       // 之前只在 contact.unreadCount > 0 时才发，列表未读数未刷新/已被UI清零时会漏发，
@@ -7217,7 +7410,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
 
-        if (_messageScrollController.hasClients) {
+        // 🔵 缓存先上屏、用户已开始翻看历史时，静默刷新不强行拉回底部
+        if (_messageScrollController.hasClients && !_isUserScrolling) {
           // 立即跳转到最大滚动位置
           final maxScroll = _messageScrollController.position.maxScrollExtent;
           _messageScrollController.jumpTo(maxScroll);
@@ -7252,10 +7446,18 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
       }
 
-      setState(() {
-        _isLoadingMessages = false;
-        _messagesError = '加载消息失败: $e';
-      });
+      // 🔵 已切到其他会话时不再改动加载状态，交给新会话自己的加载流程
+      if (mounted &&
+          _currentChatUserId == userId &&
+          _isCurrentChatGroup == isGroup) {
+        setState(() {
+          _isLoadingMessages = false;
+          // 🔵 缓存已上屏时后台刷新失败不弹整屏错误，继续展示缓存内容
+          if (!hasCache) {
+            _messagesError = '加载消息失败: $e';
+          }
+        });
+      }
       logger.debug('加载$chatType消息历史失败: $e');
     }
   }
@@ -7323,16 +7525,40 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
   }
 
-  // 加载文件传输助手消息
+  // 加载文件传输助手消息（缓存优先：命中直接上屏不转圈，后台静默刷新）
   Future<void> _loadFileAssistantMessages({int retryCount = 0}) async {
     final retryInfo = retryCount > 0 ? ' (重试 $retryCount/1)' : '';
     logger.debug('📜 开始加载文件传输助手消息$retryInfo');
+
+    // 🔵 切走前把上一个会话的消息快照进缓存，下次切回免加载秒开
+    if (retryCount == 0) {
+      _snapshotMessagesToCache();
+    }
+    final cacheKey = _chatCacheKey(0, false);
+    final cached = MobileChatPage.getMessageCache(cacheKey);
+    final hasCache = cached != null && cached.isNotEmpty;
+
     setState(() {
-      _isLoadingMessages = true;
+      _isLoadingMessages = !hasCache; // 🔵 缓存命中不转圈
       _messagesError = null;
       _currentChatUserId = 0; // 使用0表示文件助手
       _isCurrentChatGroup = false;
+      if (hasCache) {
+        _messages = List.from(cached);
+        _messagesOwnerKey = cacheKey;
+        _isScrollingToBottom = true; // 先隐藏一帧，跳到底部后再显示
+      }
     });
+    if (hasCache) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_messageScrollController.hasClients) {
+          _messageScrollController
+              .jumpTo(_messageScrollController.position.maxScrollExtent);
+        }
+        setState(() => _isScrollingToBottom = false);
+      });
+    }
 
     try {
       final token = _token;
@@ -7376,13 +7602,26 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }).toList();
 
         logger.debug('加载文件助手消息成功，共 ${messages.length} 条消息');
+
+        // 🔵 异步加载期间用户可能已切到其他会话：丢弃过期结果
+        if (!mounted || _currentChatUserId != 0) {
+          logger.debug('⏭️ 已切换到其他会话，丢弃文件助手消息加载结果');
+          return;
+        }
+
         setState(() {
           _messages = messages;
+          _messagesOwnerKey = cacheKey;
           _isLoadingMessages = false;
         });
+        // 🔵 最新结果写回缓存，供下次切回秒开
+        MobileChatPage.setMessageCache(cacheKey, messages);
 
         // 直接跳转到底部，不使用动
-        _scrollToBottom(animated: false);
+        // 🔵 缓存先上屏、用户已开始翻看时，静默刷新不强行拉回底部
+        if (!_isUserScrolling) {
+          _scrollToBottom(animated: false);
+        }
       } else {
         // 如果加载失败且还没重试过，自动重试一次
         if (retryCount < 1) {
@@ -7394,10 +7633,15 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           }
         }
 
-        setState(() {
-          _isLoadingMessages = false;
-          _messagesError = response['message'] ?? '加载消息失败';
-        });
+        // 🔵 已切走或缓存已上屏时不弹整屏错误
+        if (mounted && _currentChatUserId == 0) {
+          setState(() {
+            _isLoadingMessages = false;
+            if (!hasCache) {
+              _messagesError = response['message'] ?? '加载消息失败';
+            }
+          });
+        }
       }
     } catch (e) {
       // 如果加载失败且还没重试过，自动重试一次
@@ -7410,10 +7654,15 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
       }
 
-      setState(() {
-        _isLoadingMessages = false;
-        _messagesError = '加载消息失败: $e';
-      });
+      // 🔵 已切走或缓存已上屏时不弹整屏错误
+      if (mounted && _currentChatUserId == 0) {
+        setState(() {
+          _isLoadingMessages = false;
+          if (!hasCache) {
+            _messagesError = '加载消息失败: $e';
+          }
+        });
+      }
       logger.debug('加载文件助手消息失败: $e');
     }
   }
@@ -9942,20 +10191,40 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           : await Storage.getUserId();
       if (currentUserId == null) return;
 
+      // 免审批直加标记（全平台搜索一键添加联系人）
+      final isDirect = statusData['direct'] == true;
+
+      // 若正与对方单聊且关系已通过，实时移除"添加为联系人"横幅。
+      // 🔵 单向可见：直加场景只有发起方把对方加成了联系人，
+      // 被加方的横幅要保留（对方还不在我的列表里，我可以点横幅回加）
+      if (status == 'approved' &&
+          mounted &&
+          !_isCurrentChatGroup &&
+          (!isDirect || currentUserId == initiatorId)) {
+        final otherId = currentUserId == initiatorId ? approverId : initiatorId;
+        if (otherId != null && _currentChatUserId == otherId) {
+          setState(() => _currentChatIsFriend = true);
+        }
+      }
+
       // 显示提示消息
       if (mounted) {
         String message = '';
-        
+
         if (currentUserId == initiatorId) {
           // 当前用户是发起人，收到审核结果通知
-          if (status == 'approved') {
+          if (isDirect) {
+            // 直加场景发起人本地已有提示，这里不重复弹
+          } else if (status == 'approved') {
             message = '$approverName 已通过您的好友请求';
           } else if (status == 'rejected') {
             message = '$approverName 已拒绝您的好友请求';
           }
         } else if (currentUserId == approverId) {
           // 当前用户是审核人，收到自己审核操作的确认
-          if (status == 'approved') {
+          if (isDirect) {
+            // 🔵 单向可见：对方把我加为联系人对我无感（不出现在我的列表），不弹提示
+          } else if (status == 'approved') {
             message = '您已通过 $initiatorName 的好友请求';
           } else if (status == 'rejected') {
             message = '您已拒绝 $initiatorName 的好友请求';
@@ -9967,8 +10236,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             SnackBar(
               content: Text(message),
               duration: const Duration(seconds: 3),
-              backgroundColor: status == 'approved' 
-                  ? Colors.green 
+              backgroundColor: status == 'approved'
+                  ? Colors.green
                   : Colors.orange,
             ),
           );
@@ -11749,7 +12018,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           }
 
           setState(() {
-            _messages.add(newMessage);
+            _insertMessageInOrder(newMessage);
           });
 
           _scrollToBottom();
@@ -11806,9 +12075,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         }
 
         setState(() {
-          // 只有在真正查看当前群组时才添加到消息列表
+          // 只有在真正查看当前群组时才添加到消息列表（按时间顺序插入）
           if (isCurrentGroupChat) {
-            _messages.add(newMessage);
+            _insertMessageInOrder(newMessage);
             
             // 🔴 新增：如果是通话相关消息，强制刷新UI以确保按钮正确显示/隐藏
             if (messageType == 'call_ended' || messageType == 'call_ended_video') {
@@ -13600,29 +13869,18 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
 
     switch (code) {
       case 0:
-        // 成功发送（包括重新发送）
+        // 添加成功（免审批直接成为联系人）
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('好友请求已发送')));
+        ).showSnackBar(const SnackBar(content: Text('已添加为联系人')));
         // 🔧 修复：使用try-catch包裹刷新逻辑，避免刷新时的null错误
-        if (_selectedContactIndex == 0) {
-          try {
-            _loadContacts();
-          } catch (e, stackTrace) {
-            logger.debug('❌ [添加联系人] 刷新联系人列表失败: $e');
-            logger.debug('❌ [添加联系人] 堆栈跟踪: $stackTrace');
-            // 即使刷新失败，也不影响用户体验，只记录日志
-          }
+        try {
+          _loadContacts();
+        } catch (e, stackTrace) {
+          logger.debug('❌ [添加联系人] 刷新联系人列表失败: $e');
+          logger.debug('❌ [添加联系人] 堆栈跟踪: $stackTrace');
+          // 即使刷新失败，也不影响用户体验，只记录日志
         }
-        break;
-      case 2:
-        // 待审核中
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('已向该联系人发起过申请，请耐心等待'),
-            duration: Duration(seconds: 3),
-          ),
-        );
         break;
       case 3:
         // 已是好友
@@ -13630,38 +13888,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           context,
         ).showSnackBar(SnackBar(content: Text(message)));
         break;
-      case 5:
-        // 对方已经发送请求给你
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(message),
-            action: SnackBarAction(
-              label: '去查看',
-              onPressed: () {
-                // 导航到联系人申请页面
-                setState(() {
-                  _selectedMenuIndex = 1; // 切换到通讯录页
-                  _selectedContactIndex = 1; // 切换到申请列表
-                });
-              },
-            ),
-          ),
-        );
-        break;
       default:
-        // 其他错误（包括临时的文本匹配方案）
-        String displayMessage = message;
-
-        // 临时方案：如果后端还没有完全按照新格式返回
-        if (message.contains('待') ||
-            message.contains('审核') ||
-            message.contains('pending')) {
-          displayMessage = '已向该联系人发起过申请，请耐心等待';
-        }
-
+        // 其他错误
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text(displayMessage)));
+        ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -14769,9 +15000,6 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                   if (_selectedMenuIndex == 3)
                     // 待办页面占据全部剩余空间
                     const Expanded(child: TodoPage())
-                  else if (_selectedMenuIndex == 2)
-                    // 资讯页面占据全部剩余空间
-                    _buildNewsPage()
                   else ...[
                     // 中间列表（根据选中的菜单显示不同内容）
                     _selectedMenuIndex == 1
@@ -15255,11 +15483,6 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             label: AppLocalizations.of(context).translate('contacts'),
           ),
           _buildMenuItem(
-            index: 2,
-            icon: Icons.article,
-            label: AppLocalizations.of(context).translate('news'),
-          ),
-          _buildMenuItem(
             index: 3,
             icon: Icons.check_box,
             label: AppLocalizations.of(context).translate('todo'),
@@ -15284,15 +15507,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
   }) {
     final isSelected = _selectedMenuIndex == index;
 
-    // 计算通讯录未处理数量总和（新联系人 + 群通知）
+    // 计算通讯录未处理数量（仅群通知；添加联系人已免审批，不再有待审核联系人）
     int pendingCount = 0;
     if (index == 1) {
-      // 新联系人未处理数量
-      final newContactPendingCount = _contacts.where((c) => c.isPendingForUser(_currentUserId)).length;
-      // 群通知未处理数量
-      final groupNotificationPendingCount = _pendingGroupMembers.length;
-      // 总和
-      pendingCount = newContactPendingCount + groupNotificationPendingCount;
+      pendingCount = _pendingGroupMembers.length;
     }
 
     return InkWell(
@@ -15307,12 +15525,6 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             },
           );
           return;
-        }
-
-        // 如果点击的是资讯按钮（index 2），延迟创建 WebView
-        if (index == 2 && _tabs.isEmpty) {
-          logger.debug('📰 首次打开资讯页面，创建 WebView 标签页');
-          _addNewTab('https://mil.huanqiu.com/');
         }
 
         // 如果切换到通讯录（index 1），无条件重新加载联系人和群通知列表（不使用缓存）
@@ -15335,6 +15547,14 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           if (index != 1) {
             _selectedGroup = null;
             _selectedPerson = null;
+          } else {
+            // 进入"联系人"菜单时，默认选中"联系人"分组（index 2）
+            _selectedContactIndex = 2;
+            _selectedPerson = null;
+            _selectedGroup = null;
+            _selectedFavoriteCategory = null;
+            _contactSearchController.clear();
+            _contactSearchKeyword = '';
           }
         });
       },
@@ -15576,8 +15796,8 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         );
       }
 
-      // 搜索结果为空
-      if (_searchResults.isEmpty) {
+      // 搜索结果为空（联系人/会话与全平台用户均无结果）
+      if (_searchResults.isEmpty && _globalUserSearchResults.isEmpty) {
         return Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -15598,12 +15818,24 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         );
       }
 
-      // 显示搜索结果
-      return ListView.builder(
-        itemCount: _searchResults.length,
-        itemBuilder: (context, index) {
-          return _buildRecentContactItem(_searchResults[index], index);
-        },
+      // 显示搜索结果：上方为联系人/会话，下方为"全平台用户"区块（可直接聊天）
+      return ListView(
+        children: [
+          ..._searchResults.asMap().entries.map(
+                (entry) => _buildRecentContactItem(entry.value, entry.key),
+              ),
+          if (_globalUserSearchResults.isNotEmpty) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+              child: const Text(
+                '全平台用户',
+                style: TextStyle(fontSize: 12, color: Color(0xFF999999)),
+              ),
+            ),
+            ..._globalUserSearchResults.map(_buildGlobalUserSearchItem),
+          ],
+        ],
       );
     }
 
@@ -15697,6 +15929,77 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
       itemBuilder: (context, index) {
         return _buildRecentContactItem(sortedContacts[index], index);
       },
+    );
+  }
+
+  // 全平台用户搜索结果项：点击直接打开聊天（无需是好友）
+  Widget _buildGlobalUserSearchItem(Map<String, dynamic> user) {
+    final username = user['username']?.toString() ?? '';
+    final fullName = user['full_name']?.toString() ?? '';
+    final displayName = fullName.isNotEmpty ? fullName : username;
+    final avatar = user['avatar']?.toString();
+    final isFriend = user['is_friend'] == true;
+    final avatarText = displayName.length >= 2
+        ? displayName.substring(displayName.length - 2)
+        : displayName;
+
+    return InkWell(
+      onTap: () => _openChatWithSearchedUser(user),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            _buildAvatar(
+              avatarText: avatarText,
+              avatarUrl: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+              isOnline: false,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    displayName,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF333333),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '账号：$username',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF999999),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            if (isFriend)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6,
+                  vertical: 2,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF07C160).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: const Text(
+                  '已是联系人',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF07C160)),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -16213,6 +16516,19 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         logger.debug('已标记群组 ${contact.userId} 的所有消息为已删除');
       }
 
+      // 🔵 同步清除该会话的内存消息缓存，避免重新打开会话时闪现已删除的旧消息
+      final deletedCacheKey =
+          _chatCacheKey(contact.userId, contact.type == 'group');
+      MobileChatPage.clearCache(
+        isGroup: contact.type == 'group',
+        id: contact.userId,
+        currentUserId: currentUserId,
+      );
+      // 若删除的正是当前会话，取消归属标记，防止切换会话时把旧消息快照写回缓存
+      if (_messagesOwnerKey == deletedCacheKey) {
+        _messagesOwnerKey = null;
+      }
+
       // 保存删除状态到本地
       await Storage.addDeletedChatForCurrentUser(contactKey);
 
@@ -16291,6 +16607,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
         // 没有会话了，清空消息列表
         setState(() {
           _messages = [];
+          _messagesOwnerKey = null;
           _currentChatUserId = null;
           _isCurrentChatGroup = false;
           _selectedChatIndex = 0;
@@ -16567,19 +16884,14 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     }
   }
 
-  // 空聊天状态（未选择会话时显示背景图，文字已包含在图片中）
+  // 空聊天状态（未选择会话时显示纯色背景，按需求不再展示背景图）
   // 首次进入、会话列表尚在加载时叠加"加载中"指示，避免闪现空会话页
   Widget _buildEmptyChatWindow() {
     final isInitialLoading =
         _isLoadingRecentContacts && _recentContacts.isEmpty;
     return Expanded(
       child: Container(
-        decoration: const BoxDecoration(
-          image: DecorationImage(
-            image: AssetImage('assets/images/chat_pc_bg.png'),
-            fit: BoxFit.cover,
-          ),
-        ),
+        color: const Color(0xFFF5F5F5),
         child: isInitialLoading
             ? const Center(
                 child: Column(
@@ -16697,12 +17009,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
     );
   }
 
-  // 聊天背景壁纸装饰（PC 端专用壁纸）
+  // 聊天背景：纯色（按需求已去掉背景壁纸图片），色值与移动端浅色主题 chatBackground 一致
   static const BoxDecoration _pcChatBgDecoration = BoxDecoration(
-    image: DecorationImage(
-      image: AssetImage('assets/images/chat_pc_bg.png'),
-      fit: BoxFit.cover,
-    ),
+    color: Color(0xFFEDEDED),
   );
 
   // 消息列表区域
@@ -16808,8 +17117,79 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
               );
             }
             // 否则显示正常的消息item
-            return _buildMessageItem(_messages[index]);
+            // 与移动端一致：与上一条消息间隔超过5分钟时插入时间胶囊分隔条
+            final message = _messages[index];
+            final previousMessage = index > 0 ? _messages[index - 1] : null;
+            final showTimestamp = _shouldShowTimestampDivider(
+              message,
+              previousMessage,
+            );
+            if (!showTimestamp) {
+              return _buildMessageItem(message);
+            }
+            return Column(
+              children: [
+                _buildTimestampDivider(message.createdAt),
+                _buildMessageItem(message),
+              ],
+            );
           },
+        ),
+      ),
+    );
+  }
+
+  // 判断是否显示时间胶囊分隔条（与移动端 MobileChatPage 逻辑一致）
+  bool _shouldShowTimestampDivider(
+    MessageModel message,
+    MessageModel? previousMessage,
+  ) {
+    if (previousMessage == null) return true;
+
+    final diff = message.createdAt.difference(previousMessage.createdAt);
+    return diff.inMinutes > 5;
+  }
+
+  // 构建时间胶囊分隔条（与移动端 MobileChatPage 样式一致）
+  Widget _buildTimestampDivider(DateTime timestamp) {
+    final now = DateTime.now();
+    final isToday =
+        timestamp.year == now.year &&
+        timestamp.month == now.month &&
+        timestamp.day == now.day;
+
+    final isYesterday =
+        timestamp.year == now.year &&
+        timestamp.month == now.month &&
+        timestamp.day == now.day - 1;
+
+    String timeText;
+    if (isToday) {
+      timeText = DateFormat('HH:mm').format(timestamp);
+    } else if (isYesterday) {
+      timeText = '昨天 ${DateFormat('HH:mm').format(timestamp)}';
+    } else if (timestamp.year == now.year) {
+      timeText = DateFormat('MM-dd HH:mm').format(timestamp);
+    } else {
+      timeText = DateFormat('yyyy-MM-dd HH:mm').format(timestamp);
+    }
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 12),
+      alignment: Alignment.center,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.28),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Text(
+          timeText,
+          style: const TextStyle(
+            fontSize: 12,
+            color: Colors.white,
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ),
     );
@@ -16886,6 +17266,116 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 检查当前单聊对方是否为联系人（决定是否显示"添加为联系人"横幅）
+  Future<void> _checkCurrentChatFriendStatus(int userId) async {
+    // 先重置为未知，避免残留上一个会话的状态
+    if (mounted) {
+      setState(() => _currentChatIsFriend = null);
+    }
+
+    try {
+      final token = _token;
+      if (token == null || token.isEmpty) return;
+
+      final response = await ApiService.getContactRelation(
+        token: token,
+        friendId: userId,
+      );
+
+      // 会话可能已切换，只在仍是当前单聊对象时更新
+      if (!mounted || _isCurrentChatGroup || _currentChatUserId != userId) {
+        return;
+      }
+
+      if (response['code'] == 0 && response['data'] != null) {
+        setState(() {
+          _currentChatIsFriend = response['data']['is_friend'] == true;
+        });
+      }
+    } catch (e) {
+      logger.debug('检查联系人关系失败: $e');
+    }
+  }
+
+  /// 横幅点击：直接添加当前聊天对象为联系人（免审批，无需对方同意）
+  Future<void> _addContactFromBanner(RecentContactModel contact) async {
+    if (_isAddingContactFromBanner) return;
+    final token = _token;
+    if (token == null || token.isEmpty) return;
+
+    setState(() => _isAddingContactFromBanner = true);
+
+    try {
+      final response = await ApiService.addContactDirect(
+        token: token,
+        friendId: contact.userId,
+      );
+      if (!mounted) return;
+
+      // code 0=添加成功，3=已在联系人列表中，两种情况都视为已是联系人
+      if (response['code'] == 0 || response['code'] == 3) {
+        setState(() {
+          _currentChatIsFriend = true;
+          _isAddingContactFromBanner = false;
+        });
+        _showSnackBar('已添加 ${contact.displayName} 为联系人');
+        // 刷新通讯录列表
+        unawaited(_loadContacts());
+      } else {
+        setState(() => _isAddingContactFromBanner = false);
+        _showSnackBar(response['message']?.toString() ?? '添加联系人失败');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isAddingContactFromBanner = false);
+      _showSnackBar('添加联系人失败: $e');
+    }
+  }
+
+  /// "添加XX为联系人"横幅（一对一聊天且对方非联系人时显示在聊天头部下方）
+  Widget _buildAddContactBanner(RecentContactModel contact) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
+      decoration: const BoxDecoration(
+        color: Color(0xFFFFF8E1),
+        border: Border(
+          bottom: BorderSide(color: Color(0xFFE5E5E5), width: 1),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '${contact.displayName} 还不是你的联系人',
+              style: const TextStyle(fontSize: 13, color: Color(0xFF999999)),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton.icon(
+            onPressed: _isAddingContactFromBanner
+                ? null
+                : () => _addContactFromBanner(contact),
+            icon: _isAddingContactFromBanner
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.person_add_alt_1, size: 16),
+            label: Text('添加 ${contact.displayName} 为联系人'),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFF07C160),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
           ),
         ],
       ),
@@ -17066,6 +17556,11 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             ],
           ),
         ),
+        // "添加XX为联系人"横幅（一对一聊天且对方非联系人时显示）
+        if (!contact.isGroup &&
+            !contact.isFileAssistant &&
+            _currentChatIsFriend == false)
+          _buildAddContactBanner(contact),
         // 群公告栏（只在群组聊天且有公告时显示）
         if (contact.isGroup &&
             currentGroup != null &&
@@ -17603,10 +18098,10 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
                               message.messageType != 'video')
                             Positioned(
                               bottom: 0,
-                              right: isSelf ? -5 : null,
-                              left: isSelf ? null : -5,
+                              right: isSelf ? -7 : null,
+                              left: isSelf ? null : -7,
                               child: CustomPaint(
-                                size: const Size(11, 15),
+                                size: const Size(14, 18),
                                 painter: BubbleTailPainter(
                                   color: _highlightedMessageId == message.id
                                       ? const Color(0xFFFFF9E6)
@@ -19864,11 +20359,21 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WindowListener {
             ),
           ),
           // 通讯录分组列
+          // 添加联系人已免审批，隐藏"新联系人（待审核）"入口（index 0），其余分组索引保持不变
           Expanded(
-            child: ListView.builder(
-              itemCount: contactGroups.length,
-              itemBuilder: (context, index) {
-                return _buildContactGroupItem(contactGroups[index], index);
+            child: Builder(
+              builder: (context) {
+                const visibleGroupIndexes = [1, 2, 3, 4];
+                return ListView.builder(
+                  itemCount: visibleGroupIndexes.length,
+                  itemBuilder: (context, i) {
+                    final groupIndex = visibleGroupIndexes[i];
+                    return _buildContactGroupItem(
+                      contactGroups[groupIndex],
+                      groupIndex,
+                    );
+                  },
+                );
               },
             ),
           ),

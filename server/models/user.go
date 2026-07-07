@@ -495,12 +495,44 @@ func (r *UserRepository) GetActiveToken(userID int) (string, error) {
 }
 
 // ValidateActiveToken 验证token是否为当前活跃token
+// 🔴 PC扫码登录：手机端使用 active_token，PC端使用 desktop_active_token，
+// 两者任一匹配即视为有效，手机和PC可同时在线
 func (r *UserRepository) ValidateActiveToken(userID int, token string) (bool, error) {
-	activeToken, err := r.GetActiveToken(userID)
+	var mobileToken, desktopToken sql.NullString
+	query := `SELECT active_token, desktop_active_token FROM users WHERE id = $1`
+	err := r.DB.QueryRow(query, userID).Scan(&mobileToken, &desktopToken)
 	if err != nil {
 		return false, err
 	}
-	return activeToken == token, nil
+	if mobileToken.Valid && mobileToken.String == token {
+		return true, nil
+	}
+	if desktopToken.Valid && desktopToken.String == token {
+		return true, nil
+	}
+	return false, nil
+}
+
+// UpdateDesktopActiveToken 更新PC端的活跃token（扫码登录时调用，使旧PC token失效）
+func (r *UserRepository) UpdateDesktopActiveToken(userID int, token string) error {
+	query := `
+		UPDATE users
+		SET desktop_active_token = $1, desktop_token_updated_at = NOW() AT TIME ZONE 'UTC'
+		WHERE id = $2
+	`
+	_, err := r.DB.Exec(query, token, userID)
+	return err
+}
+
+// ClearDesktopActiveToken 清除PC端的活跃token（PC端登出时调用）
+func (r *UserRepository) ClearDesktopActiveToken(userID int) error {
+	query := `
+		UPDATE users
+		SET desktop_active_token = NULL, desktop_token_updated_at = NOW() AT TIME ZONE 'UTC'
+		WHERE id = $1
+	`
+	_, err := r.DB.Exec(query, userID)
+	return err
 }
 
 // ClearActiveToken 清除用户的活跃token（登出时调用）
@@ -555,4 +587,78 @@ func (r *UserRepository) FindByEmail(email string) (*User, error) {
 	}
 
 	return user, nil
+}
+
+// SearchUserResult 全站用户搜索结果（带与当前用户的联系人关系状态）
+type SearchUserResult struct {
+	UserID         int    `json:"user_id"`
+	Username       string `json:"username"`
+	FullName       string `json:"full_name"`
+	Avatar         string `json:"avatar"`
+	Status         string `json:"status"`
+	WorkSignature  string `json:"work_signature"`
+	ApprovalStatus string `json:"approval_status"` // approved=已是联系人；pending/rejected；空串=无关系
+	IsFriend       bool   `json:"is_friend"`
+}
+
+// SearchUsers 全站模糊搜索用户（按用户名/姓名），排除自己，并带出与当前用户的关系状态
+// 用于"搜索全平台账户直接聊天/添加联系人"功能
+func (r *UserRepository) SearchUsers(currentUserID int, keyword string, limit int) ([]SearchUserResult, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	query := `
+		SELECT
+			u.id,
+			u.username,
+			COALESCE(u.full_name, '') as full_name,
+			COALESCE(u.avatar, '') as avatar,
+			COALESCE(u.status, 'offline') as status,
+			COALESCE(u.work_signature, '') as work_signature,
+			COALESCE((
+				SELECT ur.approval_status FROM user_relations ur
+				WHERE ((ur.user_id = $1 AND ur.friend_id = u.id) OR (ur.user_id = u.id AND ur.friend_id = $1))
+				  AND COALESCE(ur.is_deleted, false) = false
+				LIMIT 1
+			), '') as approval_status
+		FROM users u
+		WHERE u.id != $1
+		  AND (u.username ILIKE $2 OR COALESCE(u.full_name, '') ILIKE $2)
+		ORDER BY u.username ASC
+		LIMIT $3
+	`
+
+	searchPattern := "%" + keyword + "%"
+
+	rows, err := r.DB.Query(query, currentUserID, searchPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SearchUserResult
+	for rows.Next() {
+		var result SearchUserResult
+		err := rows.Scan(
+			&result.UserID,
+			&result.Username,
+			&result.FullName,
+			&result.Avatar,
+			&result.Status,
+			&result.WorkSignature,
+			&result.ApprovalStatus,
+		)
+		if err != nil {
+			return nil, err
+		}
+		result.IsFriend = result.ApprovalStatus == "approved"
+		results = append(results, result)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }

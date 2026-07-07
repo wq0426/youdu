@@ -82,6 +82,15 @@ func InitDB() error {
 		fmt.Printf("⚠️ 回填 invite_codes.used_count 失败: %v\n", err)
 	}
 
+	// 轻量自迁移：PC端扫码登录（对应 migrations/add_desktop_active_token_to_users.sql）。
+	// 手机保留 active_token，PC 使用独立的 desktop_active_token，两端可同时在线。
+	if _, err = DB.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desktop_active_token TEXT`); err != nil {
+		fmt.Printf("⚠️ 添加 users.desktop_active_token 列失败: %v\n", err)
+	}
+	if _, err = DB.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desktop_token_updated_at TIMESTAMP WITH TIME ZONE`); err != nil {
+		fmt.Printf("⚠️ 添加 users.desktop_token_updated_at 列失败: %v\n", err)
+	}
+
 	// 轻量自迁移：消息同步归档表（对应 migrations/create_synced_message_tables.sql）。
 	// 消息迁移到 Agora Chat 后服务器不再经手聊天消息，由接收方客户端异步上报归档，
 	// 供管理后台展示/搜索单聊与群聊记录。agora_msg_id 唯一约束保证重复上报幂等。
@@ -131,6 +140,31 @@ func InitDB() error {
 	} {
 		if _, err = DB.Exec(q); err != nil {
 			fmt.Printf("⚠️ 创建消息同步归档表失败: %v\n", err)
+		}
+	}
+
+	// 轻量自迁移：添加联系人不再需要审核（对应 migrations/approve_all_pending_contacts.sql）。
+	// 存量的 pending 申请全部直接转为 approved，客户端不再有"待审核/通过/拒绝"概念。
+	if _, err = DB.Exec(`UPDATE user_relations SET approval_status = 'approved' WHERE approval_status = 'pending'`); err != nil {
+		fmt.Printf("⚠️ 存量待审核联系人关系转为已通过失败: %v\n", err)
+	}
+
+	// 轻量自迁移：联系人单向可见（对应 migrations/add_friend_added_to_user_relations.sql）。
+	// friend_added = 被加方（friend_id 一方）是否也把发起方加为联系人；
+	// 关系仅当 friend_added=true 时才出现在被加方的联系人列表（加人单向可见）。
+	// ⚠️ 存量关系在加列时一次性置 true（历史上是双向可见，老用户的联系人不能凭空消失）；
+	// 该 UPDATE 只能跟随加列执行一次，重复执行会把之后新产生的单向关系错误升级为双向。
+	var friendAddedColExists bool
+	if err = DB.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_name = 'user_relations' AND column_name = 'friend_added'
+	)`).Scan(&friendAddedColExists); err != nil {
+		fmt.Printf("⚠️ 检查 user_relations.friend_added 列失败: %v\n", err)
+	} else if !friendAddedColExists {
+		if _, err = DB.Exec(`ALTER TABLE user_relations ADD COLUMN friend_added BOOLEAN NOT NULL DEFAULT false`); err != nil {
+			fmt.Printf("⚠️ 添加 user_relations.friend_added 列失败: %v\n", err)
+		} else if _, err = DB.Exec(`UPDATE user_relations SET friend_added = true`); err != nil {
+			fmt.Printf("⚠️ 存量联系人关系置为双向可见失败: %v\n", err)
 		}
 	}
 

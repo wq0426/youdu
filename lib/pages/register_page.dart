@@ -192,7 +192,7 @@ class _RegisterPageState extends State<RegisterPage> {
         fit: StackFit.expand,
         children: [
           // 背景图片
-          Image.asset('assets/登录/背景图.png', fit: BoxFit.cover),
+          Image.asset('assets/登录/背景图.jpg', fit: BoxFit.cover),
           // 内容区域
           SafeArea(
             child: LayoutBuilder(

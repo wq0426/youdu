@@ -64,177 +64,8 @@ func (ctrl *ContactController) AddContact(c *gin.Context) {
 		return
 	}
 
-	// 获取现有关系详情
-	existingRelation, err := ctrl.contactRepo.GetRelationByUsers(userID.(int), friend.ID)
-	if err != nil {
-		utils.LogDebug("检查联系人关系失败: %v", err)
-		utils.InternalServerError(c, "检查联系人关系失败")
-		return
-	}
-
-	// 添加调试日志
-	if existingRelation != nil {
-		utils.LogDebug("🔍 查询到现有关系: relation_id=%d, user_id=%d, friend_id=%d, approval_status=%s, is_deleted=%v",
-			existingRelation.ID, existingRelation.UserID, existingRelation.FriendID,
-			existingRelation.ApprovalStatus, existingRelation.IsDeleted)
-	} else {
-		utils.LogDebug("🔍 未查询到现有关系，可以直接添加")
-	}
-
-	var relation *models.UserRelation
-
-	if existingRelation != nil {
-		// 检查关系是否已被删除
-		if existingRelation.IsDeleted {
-			utils.LogDebug("📋 进入分支: 关系已被删除，准备恢复")
-			// 关系已被软删除，恢复该关系
-			utils.LogDebug("检测到已删除的联系人关系，准备恢复: relation_id=%d, user_id=%d, friend_id=%d",
-				existingRelation.ID, userID.(int), friend.ID)
-			err = ctrl.contactRepo.RestoreDeletedRelation(existingRelation.ID)
-			if err != nil {
-				utils.LogDebug("恢复联系人关系失败: %v", err)
-				utils.InternalServerError(c, "恢复联系人关系失败")
-				return
-			}
-			relation = existingRelation
-			relation.ApprovalStatus = "pending"
-			relation.IsDeleted = false
-			utils.LogDebug("成功恢复已删除的联系人关系: %d -> %d", userID.(int), friend.ID)
-		} else if existingRelation.UserID == userID.(int) {
-			// 如果是自己发起的关系（且未删除）
-			switch existingRelation.ApprovalStatus {
-			case "rejected":
-				// 被拒绝了，允许重新发送
-				utils.LogDebug("📋 进入分支: 自己发起的关系被拒绝，准备重新发送")
-				err = ctrl.contactRepo.UpdateRelationStatus(existingRelation.ID, "pending")
-				if err != nil {
-					utils.LogDebug("更新联系人关系失败: %v", err)
-					utils.InternalServerError(c, "更新联系人关系失败")
-					return
-				}
-				relation = existingRelation
-				relation.ApprovalStatus = "pending"
-				utils.LogDebug("重新发送好友请求: %d -> %d", userID.(int), friend.ID)
-
-			case "pending":
-				// 还在等待审核
-				c.JSON(200, gin.H{
-					"code":    2,
-					"message": "已向该联系人发起过申请，请耐心等待",
-					"data":    nil,
-				})
-				return
-
-			case "approved":
-				// 只有已通过审核且未删除，才算真正在联系人列表中
-				if !existingRelation.IsDeleted {
-					c.JSON(200, gin.H{
-						"code":    3,
-						"message": "该用户已在您的联系人列表中",
-						"data":    nil,
-					})
-					return
-				}
-				// 如果已通过但被删除了，允许重新发送请求（恢复关系）
-				err = ctrl.contactRepo.RestoreDeletedRelation(existingRelation.ID)
-				if err != nil {
-					utils.LogDebug("恢复联系人关系失败: %v", err)
-					utils.InternalServerError(c, "恢复联系人关系失败")
-					return
-				}
-				relation = existingRelation
-				relation.ApprovalStatus = "pending"
-				relation.IsDeleted = false
-				utils.LogDebug("成功恢复已删除的approved联系人关系(自己发起): %d -> %d", userID.(int), friend.ID)
-			}
-		} else {
-			// 如果是对方发起的关系（且未删除）
-			switch existingRelation.ApprovalStatus {
-			case "pending":
-				// 对方已经向你发起了请求
-				c.JSON(200, gin.H{
-					"code":    5,
-					"message": "对方已向您发送好友请求，请到联系人申请中查看",
-					"data":    nil,
-				})
-				return
-
-			case "approved":
-				// 只有已通过审核且未删除，才算真正在联系人列表中
-				if !existingRelation.IsDeleted {
-					c.JSON(200, gin.H{
-						"code":    3,
-						"message": "该用户已在您的联系人列表中",
-						"data":    nil,
-					})
-					return
-				}
-				// 如果已通过但被删除了，允许重新发送请求（恢复关系）
-				err = ctrl.contactRepo.RestoreDeletedRelation(existingRelation.ID)
-				if err != nil {
-					utils.LogDebug("恢复联系人关系失败: %v", err)
-					utils.InternalServerError(c, "恢复联系人关系失败")
-					return
-				}
-				relation = existingRelation
-				relation.ApprovalStatus = "pending"
-				relation.IsDeleted = false
-				utils.LogDebug("成功恢复已删除的approved联系人关系(对方发起): %d -> %d", userID.(int), friend.ID)
-
-			case "rejected":
-				// 你拒绝了对方，但现在你想添加对方
-				// 删除旧的关系记录，后续会创建新的反向关系
-				utils.LogDebug("📋 进入分支: 对方发起的关系被你拒绝，现在你想添加对方，删除旧记录")
-				err = ctrl.contactRepo.DeleteRelation(existingRelation.ID)
-				if err != nil {
-					utils.LogDebug("删除旧的联系人关系失败: %v", err)
-					utils.InternalServerError(c, "删除旧的联系人关系失败")
-					return
-				}
-				// 将relation设为nil，让后续逻辑创建新的关系记录（方向相反）
-				relation = nil
-				utils.LogDebug("成功删除被拒绝的关系记录，准备创建新的反向关系: %d -> %d", userID.(int), friend.ID)
-			}
-		}
-	}
-
-	// 如果没有现有关系或需要创建新关系
-	if relation == nil {
-		// 添加联系人关系
-		relation, err = ctrl.contactRepo.AddContact(userID.(int), friend.ID)
-		if err != nil {
-			utils.LogDebug("添加联系人失败: %v", err)
-			utils.InternalServerError(c, "添加联系人失败")
-			return
-		}
-	}
-
-	// 获取发起人（用户A）的信息
-	initiator, err := ctrl.userRepo.FindByID(userID.(int))
-	if err != nil {
-		utils.LogDebug("获取发起人信息失败: %v", err)
-		// 即使获取失败，也不影响添加联系人的操作，继续执行
-	} else {
-		// 向接收方（用户B）推送联系人请求通知
-		ctrl.sendContactRequestNotification(friend, initiator, relation.ID)
-	}
-
-	// 使用统一的成功响应格式
-	c.JSON(200, gin.H{
-		"code":    0,
-		"message": "好友请求已发送",
-		"data": gin.H{
-			"relation": relation,
-			"friend": gin.H{
-				"id":             friend.ID,
-				"username":       friend.Username,
-				"full_name":      friend.FullName,
-				"avatar":         friend.Avatar,
-				"work_signature": friend.WorkSignature,
-				"status":         friend.Status,
-			},
-		},
-	})
+	// 新策略：添加联系人不再需要对方审核，直接建立联系人关系
+	ctrl.directAddContact(c, userID.(int), friend)
 }
 
 // GetContacts 获取用户的所有联系人
@@ -528,7 +359,7 @@ func (ctrl *ContactController) UpdateContactApprovalStatus(c *gin.Context) {
 		ctrl.sendApprovalMessage(relation.UserID, currentUser, initiator, "approved")
 
 		// 向双方发送联系人状态变更通知，触发APP端更新通讯录缓存
-		ctrl.sendContactStatusChangeNotification(relation.UserID, currentUserID.(int), "approved", initiator, currentUser)
+		ctrl.sendContactStatusChangeNotification(relation.UserID, currentUserID.(int), "approved", initiator, currentUser, false)
 	} else if req.ApprovalStatus == "rejected" {
 		utils.LogDebug("审核拒绝，准备发送拒绝消息")
 		utils.LogDebug("关系信息: relationID=%d, userID=%d, friendID=%d", relationID, relation.UserID, relation.FriendID)
@@ -538,7 +369,7 @@ func (ctrl *ContactController) UpdateContactApprovalStatus(c *gin.Context) {
 		ctrl.sendApprovalMessage(relation.UserID, currentUser, initiator, "rejected")
 
 		// 向双方发送联系人状态变更通知，触发APP端更新通讯录缓存
-		ctrl.sendContactStatusChangeNotification(relation.UserID, currentUserID.(int), "rejected", initiator, currentUser)
+		ctrl.sendContactStatusChangeNotification(relation.UserID, currentUserID.(int), "rejected", initiator, currentUser, false)
 	}
 
 	utils.SuccessWithMessage(c, message, nil)
@@ -889,7 +720,7 @@ func (ctrl *ContactController) DeleteContactById(c *gin.Context) {
 }
 
 // sendContactStatusChangeNotification 向双方发送联系人状态变更通知（触发APP端更新通讯录缓存）
-func (ctrl *ContactController) sendContactStatusChangeNotification(initiatorID int, approverID int, status string, initiator *models.User, approver *models.User) {
+func (ctrl *ContactController) sendContactStatusChangeNotification(initiatorID int, approverID int, status string, initiator *models.User, approver *models.User, direct bool) {
 	utils.LogDebug("🔔 准备发送联系人状态变更通知 - 发起人ID: %d, 审核人ID: %d, 状态: %s", initiatorID, approverID, status)
 
 	// 获取发起人和审核人的显示名称
@@ -917,6 +748,7 @@ func (ctrl *ContactController) sendContactStatusChangeNotification(initiatorID i
 			"initiator_name": initiatorName,
 			"approver_name":  approverName,
 			"status":         status,
+			"direct":         direct, // true=免审批直加（全平台搜索一键添加），客户端据此展示不同文案
 			"timestamp":      time.Now().Unix(),
 		},
 	}
@@ -999,4 +831,176 @@ func (ctrl *ContactController) sendContactBlockNotification(targetUserID int, op
 	} else {
 		utils.LogDebug("❌ WebSocket Hub未初始化，无法发送通知")
 	}
+}
+
+// AddContactDirectRequest 直接添加联系人请求（免审批）
+type AddContactDirectRequest struct {
+	FriendID int `json:"friend_id" binding:"required"`
+}
+
+// AddContactDirect 直接添加联系人（免审批）
+// POST /api/contacts/direct
+// 用于"全平台搜索用户后直接聊天/一键添加联系人"场景：不走 pending 审批流，
+// 直接建立（或恢复/升级为）approved 的双向好友关系，并通过 WebSocket 通知双方刷新通讯录。
+func (ctrl *ContactController) AddContactDirect(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		utils.Unauthorized(c, "未授权")
+		return
+	}
+
+	var req AddContactDirectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.BadRequest(c, "请求参数错误: "+err.Error())
+		return
+	}
+
+	if req.FriendID == userID.(int) {
+		utils.BadRequest(c, "不能添加自己为联系人")
+		return
+	}
+
+	// 查找对方用户是否存在
+	friend, err := ctrl.userRepo.FindByID(req.FriendID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			utils.NotFound(c, "该用户不存在")
+			return
+		}
+		utils.LogDebug("查询用户失败: %v", err)
+		utils.InternalServerError(c, "查询用户失败")
+		return
+	}
+
+	ctrl.directAddContact(c, userID.(int), friend)
+}
+
+// directAddContact 免审批直接建立联系人关系（新策略：所有添加入口都不需要对方审核）
+// 处理已有关系的各种状态，最终置为 approved，并通过 WebSocket 通知双方刷新通讯录
+func (ctrl *ContactController) directAddContact(c *gin.Context, userID int, friend *models.User) {
+	// 获取现有关系
+	existingRelation, err := ctrl.contactRepo.GetRelationByUsers(userID, friend.ID)
+	if err != nil {
+		utils.LogDebug("检查联系人关系失败: %v", err)
+		utils.InternalServerError(c, "检查联系人关系失败")
+		return
+	}
+
+	var relation *models.UserRelation
+
+	if existingRelation != nil {
+		// 单向可见:关系对"我"可见 = 我是发起方,或我是被加方且已回加(friend_added)
+		iAmInitiator := existingRelation.UserID == userID
+		visibleToMe := !existingRelation.IsDeleted &&
+			existingRelation.ApprovalStatus == "approved" &&
+			(iAmInitiator || existingRelation.FriendAdded)
+		if visibleToMe {
+			c.JSON(200, gin.H{
+				"code":    3,
+				"message": "该用户已在您的联系人列表中",
+				"data":    nil,
+			})
+			return
+		}
+
+		if existingRelation.IsDeleted {
+			// 恢复已删除的关系并直接置为 approved
+			err = ctrl.contactRepo.RestoreRelationApproved(existingRelation.ID)
+		} else if existingRelation.ApprovalStatus != "approved" {
+			// pending / rejected 的旧关系直接升级为 approved
+			err = ctrl.contactRepo.UpdateRelationStatus(existingRelation.ID, "approved")
+		}
+		if err != nil {
+			utils.LogDebug("更新联系人关系失败: %v", err)
+			utils.InternalServerError(c, "添加联系人失败")
+			return
+		}
+		// 我是被加方在"回加":置 friend_added,此后关系对双方可见
+		if !iAmInitiator && !existingRelation.FriendAdded {
+			if err = ctrl.contactRepo.SetFriendAdded(existingRelation.ID); err != nil {
+				utils.LogDebug("标记回加(friend_added)失败: %v", err)
+				utils.InternalServerError(c, "添加联系人失败")
+				return
+			}
+			existingRelation.FriendAdded = true
+		}
+		relation = existingRelation
+		relation.ApprovalStatus = "approved"
+		relation.IsDeleted = false
+	} else {
+		relation, err = ctrl.contactRepo.AddContactApproved(userID, friend.ID)
+		if err != nil {
+			utils.LogDebug("直接添加联系人失败: %v", err)
+			utils.InternalServerError(c, "添加联系人失败")
+			return
+		}
+	}
+
+	utils.LogDebug("✅ 直接添加联系人成功（免审批）: %d -> %d, relation_id=%d", userID, friend.ID, relation.ID)
+
+	// 向双方发送联系人状态变更通知，触发客户端刷新通讯录
+	initiator, err := ctrl.userRepo.FindByID(userID)
+	if err != nil {
+		utils.LogDebug("获取发起人信息失败: %v", err)
+	} else {
+		ctrl.sendContactStatusChangeNotification(userID, friend.ID, "approved", initiator, friend, true)
+	}
+
+	c.JSON(200, gin.H{
+		"code":    0,
+		"message": "已添加为联系人",
+		"data": gin.H{
+			"relation": relation,
+			"friend": gin.H{
+				"id":             friend.ID,
+				"username":       friend.Username,
+				"full_name":      friend.FullName,
+				"avatar":         friend.Avatar,
+				"work_signature": friend.WorkSignature,
+				"status":         friend.Status,
+			},
+		},
+	})
+}
+
+// GetContactRelation 查询当前用户与指定用户的联系人关系状态
+// GET /api/contacts/relation/:friend_id
+// 返回 is_friend / approval_status，用于聊天页判断是否显示"添加为联系人"入口
+func (ctrl *ContactController) GetContactRelation(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		utils.Unauthorized(c, "未授权")
+		return
+	}
+
+	friendIDParam := c.Param("friend_id")
+	var friendID int
+	if _, err := fmt.Sscanf(friendIDParam, "%d", &friendID); err != nil {
+		utils.BadRequest(c, "无效的用户ID")
+		return
+	}
+
+	relation, err := ctrl.contactRepo.GetRelationByUsers(userID.(int), friendID)
+	if err != nil {
+		utils.LogDebug("查询联系人关系失败: %v", err)
+		utils.InternalServerError(c, "查询联系人关系失败")
+		return
+	}
+
+	if relation == nil || relation.IsDeleted {
+		utils.Success(c, gin.H{
+			"is_friend":       false,
+			"approval_status": "",
+		})
+		return
+	}
+
+	// 单向可见:对方加了我但我未回加时,对我而言不算联系人
+	// （聊天页据此继续显示"添加为联系人"入口，让我可以回加）
+	isFriend := relation.ApprovalStatus == "approved" &&
+		(relation.UserID == userID.(int) || relation.FriendAdded)
+	utils.Success(c, gin.H{
+		"is_friend":       isFriend,
+		"approval_status": relation.ApprovalStatus,
+	})
 }

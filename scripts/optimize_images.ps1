@@ -3,7 +3,7 @@
 
 Write-Host "Optimizing images in assets folder..." -ForegroundColor Yellow
 
-$bgImage = "assets\登录\背景图.png"
+$bgImage = "assets\登录\背景图.jpg"
 
 if (Test-Path $bgImage) {
     $originalSize = (Get-Item $bgImage).Length / 1KB

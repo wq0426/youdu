@@ -123,8 +123,12 @@ class _AddFriendFromQRPageState extends State<AddFriendFromQRPage> {
         friendUsername: _userInfo!['username'],
       );
 
-      if (response['code'] == 0) {
-        _showSuccess('好友申请已发送');
+      if (response['code'] == 0 || response['code'] == 3) {
+        // 免审批直接成为联系人（code 3 = 已在联系人列表中）
+        _showSuccess('已添加为联系人');
+        if (mounted) {
+          setState(() => _isFriend = true);
+        }
         // 延迟返回
         await Future.delayed(const Duration(seconds: 1));
         if (mounted) {

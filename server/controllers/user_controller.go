@@ -772,3 +772,36 @@ func (ctrl *UserController) BatchGetCallStatus(c *gin.Context) {
 		"statuses": statusMap,
 	})
 }
+
+// SearchUsers 全站模糊搜索用户（按用户名/姓名）
+// GET /api/user/search?keyword=xxx
+// 用于"搜索全平台账户"：搜索结果可直接发起聊天，也可一键添加为联系人
+func (ctrl *UserController) SearchUsers(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		utils.Unauthorized(c, "未授权")
+		return
+	}
+
+	keyword := c.Query("keyword")
+	if keyword == "" {
+		utils.BadRequest(c, "搜索关键字不能为空")
+		return
+	}
+
+	results, err := ctrl.userRepo.SearchUsers(userID.(int), keyword, 50)
+	if err != nil {
+		utils.LogDebug("全站搜索用户失败: %v", err)
+		utils.InternalServerError(c, "搜索用户失败")
+		return
+	}
+
+	if results == nil {
+		results = []models.SearchUserResult{}
+	}
+
+	utils.Success(c, gin.H{
+		"users": results,
+		"total": len(results),
+	})
+}

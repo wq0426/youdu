@@ -44,7 +44,7 @@ class AppLocalizations {
 
       // 主页
       'chat': '会话',
-      'contacts': '通讯录',
+      'contacts': '联系人',
       'news': '资讯',
       'todo': '待办',
       'settings': '设置',
@@ -480,7 +480,7 @@ class AppLocalizations {
 
       // 主页
       'chat': '會話',
-      'contacts': '通訊錄',
+      'contacts': '聯絡人',
       'news': '資訊',
       'todo': '待辦',
       'settings': '設置',

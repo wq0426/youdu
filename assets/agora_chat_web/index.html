@@ -169,7 +169,9 @@
       try {
         var arg = JSON.parse(argJson);
         if (!sdk()) { _result(callId, false, 'websdk 未注入或缺少 connection 构造器'); return; }
-        conn = new (sdk().connection)({ appKey: arg.appKey });
+        // autoReconnectNumMax:调大 SDK 自身断线重连次数(默认很少,耗尽即永久离线);
+        // 耗尽后仍由 Dart 侧看门狗重登录兜底
+        conn = new (sdk().connection)({ appKey: arg.appKey, autoReconnectNumMax: 50 });
         registerHandlers();
         _result(callId, true, {});
       } catch (e) { _result(callId, false, String(e)); }
@@ -180,12 +182,19 @@
       try {
         var arg = JSON.parse(argJson);
         currentUser = String(arg.user);
+        // 已在线(如断线看门狗重登录与 SDK 自动重连竞态,后者先成功)时
+        // 重复 open 会报"已登录",直接视为成功
+        try {
+          if (conn.isOpened && conn.isOpened()) { _result(callId, true, { already: true }); return; }
+        } catch (e0) { /* isOpened 不可用则照常走 open */ }
         conn.open({ user: currentUser, accessToken: arg.token })
           .then(function () { _result(callId, true, {}); })
           .catch(function (e) {
-            // code=207/已登录 视为成功
             var code = (e && (e.type || e.code));
-            _result(callId, false, (e && (e.message || e.data)) ? JSON.stringify({ code: code, msg: e.message || e.data }) : String(e));
+            var msg = (e && (e.message || e.data)) ? String(e.message || e.data) : String(e);
+            // "已登录"视为成功
+            if (/already.*(log|open)/i.test(msg)) { _result(callId, true, { already: true }); return; }
+            _result(callId, false, JSON.stringify({ code: code, msg: msg }));
           });
       } catch (e) { _result(callId, false, String(e)); }
     },

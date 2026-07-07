@@ -112,6 +112,25 @@ class AgoraChatService {
   /// key: 单聊 'u:<对端用户ID>';群聊 'g:<Agora群ID>'
   final Map<String, MessageModel> _desktopLastMsg = {};
 
+  // ---- 桌面端断线自动重登录看门狗 ----
+  // Web SDK 断线自动重连次数有限,耗尽后连接永久死亡(网络恢复也不会自己活过来),
+  // 且启动时断网会导致登录失败后再无人重试 → PC 永久离线。
+  // 由 Dart 侧兜底:按退避重新向后端换 chat token 并登录(顺带解决离线期间
+  // token 过期);重登录成功后 Agora 服务端会自动下发离线消息。
+  int? _lastLoginUserId; // 最近一次 loginFromBackend 的业务用户ID(重登录用)
+  bool _bridgeConnected = false;
+  bool _manualLogout = false; // 主动登出后停止看门狗,避免登出/被踢后反复抢登
+  Timer? _bridgeReloginTimer;
+  int _bridgeReloginAttempt = 0;
+  bool _bridgeReloginInFlight = false;
+
+  // ---- 桌面端 WebView 存活探测 ----
+  // WKWebView 的 JS 跑在独立 WebContent 进程,被系统挂起/终止时 Web SDK
+  // 连 onDisconnected 都发不出来(实测:桥接日志瞬间全灭,断线看门狗全程无感知),
+  // 只能由 Dart 侧定期 eval 探测 + 进程终止回调兜底,判死后整体重建 WebView。
+  Timer? _bridgeLivenessTimer;
+  bool _bridgeRebuildInFlight = false;
+
   /// 初始化 SDK（幂等）。优先使用传入的 appKey，其次用 AgoraConfig.chatAppKey。
   Future<bool> init({String? appKey}) async {
     final key =
@@ -120,7 +139,15 @@ class AgoraChatService {
       logger.error('💬 [AgoraChat] AppKey 未配置，无法初始化（请在 Agora 控制台开通即时通讯后填入 AgoraConfig.chatAppKey 或由后端 /api/chat/token 下发）');
       return false;
     }
-    if (_initialized && _appKey == key) return true;
+    if (_initialized && _appKey == key) {
+      if (!_useWebBridge) return true;
+      // 桌面端:已初始化的 WebView 可能已被系统杀死(JS 冻结时不会有任何回调),
+      // 复用前必须探活;死了就销毁重建,否则后续 login/收发全部静默超时
+      if (_bridge.isRunning && await _bridge.ping()) return true;
+      logger.error('💬 [AgoraChat] 桥接 WebView 已死,销毁后重新初始化');
+      await _bridge.dispose();
+      _initialized = false;
+    }
 
     // 桌面端:启动后台 WebView 桥接并初始化 Web SDK 连接
     if (_useWebBridge) {
@@ -238,7 +265,22 @@ class AgoraChatService {
     required int userId,
     required String authToken,
   }) async {
+    _manualLogout = false;
+    final ok = await _loginFromBackendOnce(userId: userId, authToken: authToken);
+    // 桌面端:启动时断网等原因登录失败,交给看门狗定时重试,
+    // 否则 PC 将一直离线,网络恢复后也收不到消息、拉不到历史。
+    if (!ok && _useWebBridge) {
+      _scheduleBridgeRelogin();
+    }
+    return ok;
+  }
+
+  Future<bool> _loginFromBackendOnce({
+    required int userId,
+    required String authToken,
+  }) async {
     _authToken = authToken;
+    _lastLoginUserId = userId;
     try {
       final resp = await ApiService.getChatToken(token: authToken);
       if (resp['code'] != 0 || resp['data'] == null) {
@@ -277,6 +319,7 @@ class AgoraChatService {
       if (ok) {
         _currentUsername = username;
         _loggedIn = true;
+        _startBridgeLivenessWatch();
         logger.debug('💬 [AgoraChat/桥接] 登录成功 username=$username');
       } else {
         logger.error('💬 [AgoraChat/桥接] 登录失败 username=$username');
@@ -986,10 +1029,18 @@ class AgoraChatService {
     final futures = convs.map<Future<AgoraConversationSummary?>>((c) async {
       try {
         final isGroup = c.type == ChatConversationType.GroupChat;
+        // 群会话必须能映射回本地群ID；映射缺失说明该群已在服务端解散/退出
+        // （或映射尚未登记），此时跳过，绝不能把 Agora 群ID（雪花大数）当
+        // 本地群ID 用——下游会拿它调 /api/groups/{id} 导致 int4 溢出 500。
         final int peerId = isGroup
-            ? (localGroupIdFor(c.id) ?? int.tryParse(c.id) ?? 0)
+            ? (localGroupIdFor(c.id) ?? 0)
             : (int.tryParse(c.id) ?? 0);
-        if (peerId == 0) return null;
+        if (peerId == 0) {
+          if (isGroup) {
+            logger.debug('💬 [会话摘要] 群会话 ${c.id} 无本地群映射，跳过');
+          }
+          return null;
+        }
         final results = await Future.wait([c.latestMessage(), c.unreadCount()]);
         final last = results[0] as ChatMessage?;
         final unread = results[1] as int;
@@ -1486,7 +1537,16 @@ class AgoraChatService {
     if (_bridgeWired) return;
     _bridgeWired = true;
     _bridge.onConnectionChanged = (connected) {
-      if (connected) _loggedIn = true;
+      _bridgeConnected = connected;
+      if (connected) {
+        _loggedIn = true;
+        _bridgeReloginAttempt = 0;
+        _bridgeReloginTimer?.cancel();
+        _bridgeReloginTimer = null;
+      } else {
+        // Web SDK 自动重连次数耗尽后连接永久死亡,由看门狗兜底重登录
+        _scheduleBridgeRelogin();
+      }
       _connectionController.add(connected);
       logger.debug('💬 [AgoraChat/桥接] ${connected ? "onConnected" : "onDisconnected"}');
     };
@@ -1540,6 +1600,95 @@ class AgoraChatService {
         _conversationReadController.add(from);
       }
     };
+    _bridge.onProcessDied = () {
+      unawaited(_handleBridgeDead('WebContent 进程终止'));
+    };
+  }
+
+  /// 桌面端 WebView 存活探测(每 30s 一次)。JS 冻结/进程死亡时 Web SDK
+  /// 不会发出任何事件,断线看门狗无从触发,这里是唯一的兜底检测点。
+  void _startBridgeLivenessWatch() {
+    if (!_useWebBridge || _bridgeLivenessTimer != null) return;
+    _bridgeLivenessTimer =
+        Timer.periodic(const Duration(seconds: 30), (_) async {
+      if (_manualLogout || _bridgeRebuildInFlight || _bridgeReloginInFlight) {
+        return;
+      }
+      if (!_bridge.isRunning) return; // 尚未启动/重建中
+      final alive = await _bridge.ping();
+      if (!alive && !_manualLogout && !_bridgeRebuildInFlight) {
+        await _handleBridgeDead('存活探测无响应');
+      }
+    });
+  }
+
+  /// 桥接 WebView 判死后的整体重建:销毁 WebView → 复位初始化标记 →
+  /// 广播离线 → 交给既有断线看门狗走"换 token → 重建 WebView → 重登录"。
+  Future<void> _handleBridgeDead(String reason) async {
+    if (_bridgeRebuildInFlight || _manualLogout) return;
+    _bridgeRebuildInFlight = true;
+    try {
+      logger.error('💬 [AgoraChat/桥接] WebView 已死($reason),销毁并重建');
+      await _bridge.dispose();
+      // 复位初始化标记,让看门狗重登录路径里的 init() 重新走
+      // ensureStarted(新建 WebView)+ acbridge.init(重建 SDK 连接)
+      _initialized = false;
+      _loggedIn = false;
+      if (_bridgeConnected) {
+        _bridgeConnected = false;
+        _connectionController.add(false);
+      }
+    } finally {
+      _bridgeRebuildInFlight = false;
+    }
+    _scheduleBridgeRelogin();
+  }
+
+  /// 桌面端断线/登录失败自动重登录(看门狗),按 3s/6s/12s/30s 退避无限重试。
+  /// 重试 = 重新向后端换取 chat token 再 conn.open(顺带解决离线期间 token 过期);
+  /// 成功后主动广播一次 connected,让页面层补拉会话列表/当前聊天历史。
+  void _scheduleBridgeRelogin() {
+    if (!_useWebBridge || _manualLogout) return;
+    if (_authToken == null || _lastLoginUserId == null) return;
+    if (_bridgeReloginTimer != null || _bridgeReloginInFlight) return;
+    const delays = [3, 6, 12, 30];
+    final delay = Duration(
+      seconds: delays[_bridgeReloginAttempt < delays.length
+          ? _bridgeReloginAttempt
+          : delays.length - 1],
+    );
+    _bridgeReloginAttempt++;
+    logger.debug(
+        '💬 [AgoraChat/桥接] ${delay.inSeconds}s 后尝试第 $_bridgeReloginAttempt 次重登录');
+    _bridgeReloginTimer = Timer(delay, () async {
+      _bridgeReloginTimer = null;
+      if (_bridgeConnected || _manualLogout) return;
+      // 定时器触发时重读当前凭据:期间可能已切换账号/登出
+      final uid = _lastLoginUserId;
+      final auth = _authToken;
+      if (uid == null || auth == null) return;
+      _bridgeReloginInFlight = true;
+      var ok = false;
+      try {
+        ok = await _loginFromBackendOnce(userId: uid, authToken: auth);
+      } catch (e) {
+        logger.debug('💬 [AgoraChat/桥接] 重登录异常: $e');
+      }
+      _bridgeReloginInFlight = false;
+      if (_manualLogout) return;
+      if (ok) {
+        _bridgeReloginAttempt = 0;
+        // conn.open 成功后 Web SDK 不一定再回调 onConnected,主动补发一次,
+        // 页面层依赖该事件做断线期间消息的补拉
+        if (!_bridgeConnected) {
+          _bridgeConnected = true;
+          _connectionController.add(true);
+        }
+        logger.debug('💬 [AgoraChat/桥接] 重登录成功,离线消息将由服务端自动下发');
+      } else {
+        _scheduleBridgeRelogin();
+      }
+    });
   }
 
   /// 把桥接层的 normMsg map 合成为 SDK 的 ChatMessage(纯 Dart,走 fromJson)。
@@ -1555,27 +1704,27 @@ class AgoraChatService {
     final ext = (m['ext'] is Map)
         ? Map<String, dynamic>.from(m['ext'] as Map)
         : <String, dynamic>{};
-    // 🔴 fromJson 的枚举字段(direction/body.type/chatType/status)都要求
-    // 枚举下标 int，传字符串会抛 type 'String' is not a subtype of type 'int'；
-    // 会话ID的键是 convId 而非 conversationId。
+    // 🔴 agora_chat_sdk 1.3.3 的 fromJson：body.type/direction 是字符串
+    // ('txt'/'cmd'、'send'/'rec')，body.type 不匹配时 _bodyFromMap 返回 null
+    // 会被 `!` 断言抛 Null check operator；chatType/status 仍是 int；
+    // 会话ID的键是 conversationId。
     return ChatMessage.fromJson({
       'from': from,
       'to': to,
       'body': isCmd
           ? {
-              'type': MessageType.CMD.index,
+              'type': 'cmd',
               'action': m['action']?.toString() ?? '',
             }
           : {
-              'type': MessageType.TXT.index,
+              'type': 'txt',
               'content': m['msg']?.toString() ?? '',
             },
       'attributes': ext,
-      'direction': (isSend ? MessageDirection.SEND : MessageDirection.RECEIVE)
-          .index,
+      'direction': isSend ? 'send' : 'rec',
       'msgId': m['id']?.toString() ?? '',
       // 单聊会话ID=对端;群聊=Agora群ID(to)
-      'convId': isGroup ? to : (isSend ? to : from),
+      'conversationId': isGroup ? to : (isSend ? to : from),
       'chatType': (isGroup ? ChatType.GroupChat : ChatType.Chat).index,
       'serverTime': time,
       'localTime': time,
@@ -1726,6 +1875,14 @@ class AgoraChatService {
 
   /// 登出（清理登录态，保留 SDK 初始化）
   Future<void> logout() async {
+    // 主动登出:停止断线重登录看门狗(在 await 前置位,避免定时器竞态抢登)
+    _manualLogout = true;
+    _bridgeReloginTimer?.cancel();
+    _bridgeReloginTimer = null;
+    _bridgeReloginAttempt = 0;
+    _bridgeLivenessTimer?.cancel();
+    _bridgeLivenessTimer = null;
+    _bridgeConnected = false;
     try {
       if (_initialized) {
         if (_useWebBridge) {

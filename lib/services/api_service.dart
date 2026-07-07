@@ -291,6 +291,68 @@ class ApiService {
     return response;
   }
 
+  // ==================== PC端扫码登录 ====================
+
+  /// PC端：创建扫码登录会话
+  /// 返回: data: { qr_id: "...", expires_in: 120 }
+  static Future<Map<String, dynamic>> createQRLoginSession() async {
+    return await post(ApiConfig.authQRCodeCreate, {});
+  }
+
+  /// PC端：轮询扫码登录状态
+  /// 返回: data: { status: "pending|scanned|confirmed|cancelled|expired", ... }
+  /// status=scanned 时附带 user: { nickname, avatar }
+  /// status=confirmed 时附带 token 和完整 user（与密码登录返回一致）
+  static Future<Map<String, dynamic>> getQRLoginStatus(String qrId) async {
+    final response =
+        await get('${ApiConfig.authQRCodeStatus}?qr_id=$qrId');
+
+    // 🔄 替换确认登录返回的用户头像（与密码登录一致）
+    if (response['code'] == 0 && response['data'] != null) {
+      final data = response['data'];
+      if (data['user'] != null && data['user'] is Map<String, dynamic>) {
+        final user = data['user'] as Map<String, dynamic>;
+        if (user['avatar'] != null) {
+          final avatar = user['avatar'] as String;
+          if (avatar.isNotEmpty) {
+            final replacedAvatar = await Storage.replaceOSSPrefixInUrl(avatar);
+            if (replacedAvatar != avatar) {
+              user['avatar'] = replacedAvatar;
+            }
+          }
+        }
+      }
+    }
+
+    return response;
+  }
+
+  /// 手机端：扫描PC登录二维码（需登录）
+  static Future<Map<String, dynamic>> scanQRLogin({
+    required String qrId,
+    required String token,
+  }) async {
+    return await post(ApiConfig.authQRCodeScan, {'qr_id': qrId}, token: token);
+  }
+
+  /// 手机端：确认PC端登录（需登录）
+  static Future<Map<String, dynamic>> confirmQRLogin({
+    required String qrId,
+    required String token,
+  }) async {
+    return await post(ApiConfig.authQRCodeConfirm, {'qr_id': qrId},
+        token: token);
+  }
+
+  /// 手机端：取消PC端登录（需登录）
+  static Future<Map<String, dynamic>> cancelQRLogin({
+    required String qrId,
+    required String token,
+  }) async {
+    return await post(ApiConfig.authQRCodeCancel, {'qr_id': qrId},
+        token: token);
+  }
+
   /// 发送验证码
   ///
   /// 请求参数:
@@ -1486,6 +1548,100 @@ class ApiService {
     } catch (e) {
       throw ApiException(message: '网络请求失败: $e');
     }
+  }
+
+  /// 全站模糊搜索用户（搜索全平台所有账户）
+  ///
+  /// 请求参数:
+  /// - token: 登录凭证 (必填)
+  /// - keyword: 搜索关键字(必填)
+  ///
+  /// 返回:
+  /// - code: 0 表示成功
+  /// - data: { users: [...], total: 0 }
+  ///   每个用户包含: user_id, username, full_name, avatar, status,
+  ///   work_signature, approval_status, is_friend
+  static Future<Map<String, dynamic>> searchAllUsers({
+    required String token,
+    required String keyword,
+  }) async {
+    try {
+      final headers = {'Content-Type': 'application/json; charset=UTF-8'};
+      headers['Authorization'] = 'Bearer $token';
+
+      final uri = Uri.parse(ApiConfig.getApiUrl(ApiConfig.contacts)).replace(
+        path: '/api/user/search',
+        queryParameters: {'keyword': keyword},
+      );
+
+      final response = await http.get(uri, headers: headers);
+      final result = _handleResponse(response);
+
+      // 🔄 替换搜索结果中的头像
+      if (result['code'] == 0 && result['data'] != null) {
+        final data = result['data'];
+        if (data['users'] != null && data['users'] is List) {
+          final users = data['users'] as List;
+          for (var user in users) {
+            if (user is Map<String, dynamic> && user['avatar'] != null) {
+              final avatar = user['avatar'] as String;
+              if (avatar.isNotEmpty) {
+                final replacedAvatar = await Storage.replaceOSSPrefixInUrl(avatar);
+                if (replacedAvatar != avatar) {
+                  user['avatar'] = replacedAvatar;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      return result;
+    } catch (e) {
+      throw ApiException(message: '网络请求失败: $e');
+    }
+  }
+
+  /// 直接添加联系人（免审批）
+  ///
+  /// 请求参数:
+  /// - token: 登录凭证 (必填)
+  /// - friendId: 对方用户ID (必填)
+  ///
+  /// 返回:
+  /// - code: 0 添加成功；3 已在联系人列表中
+  /// - data: { relation: {...}, friend: {...} }
+  static Future<Map<String, dynamic>> addContactDirect({
+    required String token,
+    required int friendId,
+  }) async {
+    logger.debug('🔄 直接添加联系人(免审批): friendId=$friendId');
+    try {
+      final result = await post('${ApiConfig.contacts}/direct', {
+        'friend_id': friendId,
+      }, token: token);
+      logger.debug('✅ 直接添加联系人成功: $result');
+      return result;
+    } catch (e) {
+      logger.debug('❌ 直接添加联系人失败: $e');
+      rethrow;
+    }
+  }
+
+  /// 查询与指定用户的联系人关系状态
+  ///
+  /// 请求参数:
+  /// - token: 登录凭证 (必填)
+  /// - friendId: 对方用户ID (必填)
+  ///
+  /// 返回:
+  /// - code: 0 表示成功
+  /// - data: { is_friend: bool, approval_status: 'approved'|'pending'|'rejected'|'' }
+  static Future<Map<String, dynamic>> getContactRelation({
+    required String token,
+    required int friendId,
+  }) async {
+    return await get('${ApiConfig.contacts}/relation/$friendId', token: token);
   }
 
   /// 更新联系人审核状态

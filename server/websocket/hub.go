@@ -14,9 +14,17 @@ const (
 	messageWorkerCount = 64
 )
 
+// 设备类型：手机和PC各占一个连接位，同设备类型顶号、跨设备类型共存
+// （PC扫码登录后手机和PC同时在线）
+const (
+	DeviceMobile  = "mobile"
+	DeviceDesktop = "desktop"
+)
+
 // Client 表示一个WebSocket客户端连接
 type Client struct {
 	UserID      int
+	Device      string // 设备类型：mobile / desktop，空值按 mobile 处理（兼容旧客户端）
 	Conn        *Conn
 	Send        chan []byte
 	closed      bool       // 标记 Send channel 是否已关闭
@@ -54,8 +62,9 @@ type IncomingMessage struct {
 //   - 发送缓冲满只丢弃该条消息，绝不关闭连接；连接的关闭只由三种情况触发：
 //     心跳超时（CheckHeartbeat）、底层读写超时（ReadPump/WritePump）、同账号顶号
 type Hub struct {
-	// 已注册的客户端 (userID -> Client)
-	clients map[int]*Client
+	// 已注册的客户端 (userID -> 设备类型 -> Client)
+	// 🔴 同一用户手机和PC可同时在线，各设备类型只保留一个连接
+	clients map[int]map[string]*Client
 
 	// 用户通话状态 (userID -> UserCallStatus)
 	callStatuses map[int]*UserCallStatus
@@ -77,7 +86,7 @@ type Hub struct {
 // NewHub 创建新的Hub
 func NewHub() *Hub {
 	return &Hub{
-		clients:      make(map[int]*Client),
+		clients:      make(map[int]map[string]*Client),
 		callStatuses: make(map[int]*UserCallStatus),
 		MessageQueue: make(chan *IncomingMessage, messageQueueSize),
 	}
@@ -175,30 +184,39 @@ func (c *Client) GetMissedPings() int {
 // 保证大量用户同时建立连接也不会互相阻塞、不会影响已有连接的消息收发
 func (h *Hub) RegisterClient(client *Client) {
 	client.ConnectedAt = time.Now()
+	if client.Device == "" {
+		client.Device = DeviceMobile
+	}
 
 	h.mu.Lock()
-	oldClient := h.clients[client.UserID]
-	h.clients[client.UserID] = client
+	devices := h.clients[client.UserID]
+	if devices == nil {
+		devices = make(map[string]*Client)
+		h.clients[client.UserID] = devices
+	}
+	oldClient := devices[client.Device]
+	devices[client.Device] = client
 	totalOnline := len(h.clients)
 	h.mu.Unlock()
 
-	// 🔴 同账号重复登录：踢旧连接的通知和延迟关闭放到独立 goroutine，
+	// 🔴 同账号同设备类型重复登录：踢旧连接的通知和延迟关闭放到独立 goroutine，
 	// 不阻塞注册流程（旧实现在这里的 100ms Sleep 会卡住整个 Hub）
-	// 注意：新连接已先替换进 map，forced_logout 只会发到旧连接
+	// 注意：新连接已先替换进 map，forced_logout 只会发到旧连接；
+	// 手机和PC属于不同设备类型，互不顶号
 	if oldClient != nil {
 		go func() {
-			utils.LogDebug("🔄 [Hub] 用户 %d 重新连接，向旧设备发送踢下线通知", client.UserID)
+			utils.LogDebug("🔄 [Hub] 用户 %d(%s) 重新连接，向旧设备发送踢下线通知", client.UserID, client.Device)
 			forceLogoutMsg := []byte(`{"type":"forced_logout","data":{"reason":"您的账号已在其他设备登录"},"message":"您的账号已在其他设备登录"}`)
 			if oldClient.SafeSend(forceLogoutMsg) {
 				// 给旧设备一点时间处理通知
 				time.Sleep(100 * time.Millisecond)
 			}
 			oldClient.closeSend()
-			utils.LogDebug("✅ [Hub] 用户 %d 旧连接已关闭，新连接已接管", client.UserID)
+			utils.LogDebug("✅ [Hub] 用户 %d(%s) 旧连接已关闭，新连接已接管", client.UserID, client.Device)
 		}()
 	}
 
-	utils.LogDebug("✅ [Hub] 用户 %d 已注册 (当前在线: %d)", client.UserID, totalOnline)
+	utils.LogDebug("✅ [Hub] 用户 %d(%s) 已注册 (当前在线: %d)", client.UserID, client.Device, totalOnline)
 }
 
 // UnregisterClient 注销客户端连接
@@ -206,10 +224,16 @@ func (h *Hub) RegisterClient(client *Client) {
 // 避免误删同一账号已接管的新连接
 func (h *Hub) UnregisterClient(client *Client) {
 	h.mu.Lock()
-	currentClient, ok := h.clients[client.UserID]
+	devices := h.clients[client.UserID]
+	currentClient, ok := devices[client.Device]
 	isCurrent := ok && currentClient == client
+	userOffline := false
 	if isCurrent {
-		delete(h.clients, client.UserID)
+		delete(devices, client.Device)
+		if len(devices) == 0 {
+			delete(h.clients, client.UserID)
+			userOffline = true
+		}
 	}
 	totalOnline := len(h.clients)
 	h.mu.Unlock()
@@ -218,8 +242,9 @@ func (h *Hub) UnregisterClient(client *Client) {
 	client.closeSend()
 
 	if isCurrent {
-		utils.LogDebug("🔌 [Hub] 用户 %d 已断开连接 (总连接数: %d)", client.UserID, totalOnline)
-		if h.OnUserOffline != nil {
+		utils.LogDebug("🔌 [Hub] 用户 %d(%s) 已断开连接 (总在线用户: %d)", client.UserID, client.Device, totalOnline)
+		// 🔴 用户所有设备都下线后才触发离线回调（避免PC在线时手机断开被标记为离线）
+		if userOffline && h.OnUserOffline != nil {
 			go h.OnUserOffline(client.UserID)
 		}
 	} else {
@@ -232,8 +257,8 @@ func (h *Hub) UnregisterClient(client *Client) {
 func (h *Hub) IsUserOnline(userID int) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	_, ok := h.clients[userID]
-	return ok
+	// 空的设备map会在注销时一并删除，存在即在线
+	return len(h.clients[userID]) > 0
 }
 
 // GetOnlineUserCount 获取在线用户数
@@ -249,21 +274,32 @@ func (h *Hub) GetOnlineUserCount() int {
 //    （真正断开的连接会由心跳超时/底层读写超时自动清理）
 func (h *Hub) SendToUser(userID int, message []byte) bool {
 	h.mu.RLock()
-	client, ok := h.clients[userID]
+	devices := h.clients[userID]
+	clients := make([]*Client, 0, len(devices))
+	for _, client := range devices {
+		clients = append(clients, client)
+	}
 	h.mu.RUnlock()
 
-	if !ok {
+	if len(clients) == 0 {
 		utils.LogDebug("⚠️ [Hub] 用户 %d 不在线，无法发送消息", userID)
 		return false
 	}
 
-	if !client.SafeSend(message) {
-		utils.LogDebug("⚠️ [Hub] 用户 %d 发送缓冲已满或连接已关闭，本条消息未投递", userID)
-		return false
+	// 🔴 手机和PC可同时在线，消息投递到该用户的所有设备
+	delivered := false
+	for _, client := range clients {
+		if client.SafeSend(message) {
+			delivered = true
+		} else {
+			utils.LogDebug("⚠️ [Hub] 用户 %d(%s) 发送缓冲已满或连接已关闭，本条消息未投递", userID, client.Device)
+		}
 	}
 
-	utils.LogDebug("✅ [Hub] 消息已投递到用户 %d 的发送队列", userID)
-	return true
+	if delivered {
+		utils.LogDebug("✅ [Hub] 消息已投递到用户 %d 的发送队列", userID)
+	}
+	return delivered
 }
 
 // BroadcastToChannel 向频道中的所有在线用户广播消息（排除指定用户）
@@ -276,20 +312,22 @@ func (h *Hub) BroadcastToChannel(channelName string, message []byte, excludeUser
 
 	h.mu.RLock()
 	var sentCount int
-	for userID, client := range h.clients {
+	for userID, devices := range h.clients {
 		// 跳过排除的用户
 		if userID == excludeUserID {
 			continue
 		}
 
-		// 发送消息给所有其他在线用户（简化实现）
+		// 发送消息给所有其他在线用户的所有设备（简化实现）
 		// 在实际应用中，应该维护频道-用户的映射关系
 		// 🔴 必须走 SafeSend：裸写已关闭的 channel 会 panic 导致整个进程崩溃
-		if client.SafeSend(message) {
-			sentCount++
-			utils.LogDebug("✅ [Hub] 频道广播消息已发送给用户 %d", userID)
-		} else {
-			utils.LogDebug("❌ [Hub] 向用户 %d 发送频道广播消息失败", userID)
+		for _, client := range devices {
+			if client.SafeSend(message) {
+				sentCount++
+				utils.LogDebug("✅ [Hub] 频道广播消息已发送给用户 %d(%s)", userID, client.Device)
+			} else {
+				utils.LogDebug("❌ [Hub] 向用户 %d(%s) 发送频道广播消息失败", userID, client.Device)
+			}
 		}
 	}
 	h.mu.RUnlock()
@@ -309,14 +347,16 @@ func (h *Hub) BroadcastToUsers(userIDs []int, message []byte, excludeUserID int)
 			continue
 		}
 
-		// 检查用户是否在线
-		if client, ok := h.clients[userID]; ok {
-			// 🔴 必须走 SafeSend：裸写已关闭的 channel 会 panic 导致整个进程崩溃
-			if client.SafeSend(message) {
-				sentCount++
-				utils.LogDebug("✅ [Hub] 广播消息已发送给用户 %d", userID)
-			} else {
-				utils.LogDebug("❌ [Hub] 向用户 %d 发送广播消息失败", userID)
+		// 检查用户是否在线（向该用户的所有设备发送）
+		if devices, ok := h.clients[userID]; ok && len(devices) > 0 {
+			for _, client := range devices {
+				// 🔴 必须走 SafeSend：裸写已关闭的 channel 会 panic 导致整个进程崩溃
+				if client.SafeSend(message) {
+					sentCount++
+					utils.LogDebug("✅ [Hub] 广播消息已发送给用户 %d(%s)", userID, client.Device)
+				} else {
+					utils.LogDebug("❌ [Hub] 向用户 %d(%s) 发送广播消息失败", userID, client.Device)
+				}
 			}
 		} else {
 			utils.LogDebug("⚠️ [Hub] 用户 %d 不在线，跳过发送", userID)
@@ -333,39 +373,52 @@ func (h *Hub) BroadcastGroupDisbanded(groupID int) {
 	utils.LogDebug("📢 [Hub] 群组 %d 已被解散", groupID)
 }
 
-// ForceLogoutUser 强制用户下线（用于单设备登录限制）
-// 向指定用户发送强制下线通知，并关闭其WebSocket连接
+// ForceLogoutUser 强制用户所有设备下线（管理员禁用等场景）
 func (h *Hub) ForceLogoutUser(userID int, reason string) bool {
-	h.mu.Lock()
-	client, ok := h.clients[userID]
+	kickedMobile := h.ForceLogoutDevice(userID, DeviceMobile, reason)
+	kickedDesktop := h.ForceLogoutDevice(userID, DeviceDesktop, reason)
+	return kickedMobile || kickedDesktop
+}
+
+// ForceLogoutDevice 强制用户指定设备类型的连接下线
+// 手机端重新登录只踢旧手机、PC扫码登录只踢旧PC，另一端不受影响
+func (h *Hub) ForceLogoutDevice(userID int, device string, reason string) bool {
+	h.mu.RLock()
+	client, ok := h.clients[userID][device]
+	h.mu.RUnlock()
 	if !ok {
-		h.mu.Unlock()
-		utils.LogDebug("⚠️ [Hub] 用户 %d 不在线，无需踢下线", userID)
+		utils.LogDebug("⚠️ [Hub] 用户 %d(%s) 不在线，无需踢下线", userID, device)
 		return false
 	}
-	h.mu.Unlock()
 
 	// 构造强制下线消息
 	forceLogoutMsg := []byte(`{"type":"forced_logout","data":{"reason":"` + reason + `"},"message":"` + reason + `"}`)
 
 	// 发送踢下线通知
 	if client.SafeSend(forceLogoutMsg) {
-		utils.LogDebug("✅ [Hub] 已向用户 %d 发送强制下线通知: %s", userID, reason)
+		utils.LogDebug("✅ [Hub] 已向用户 %d(%s) 发送强制下线通知: %s", userID, device, reason)
 		// 给客户端一点时间处理通知
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// 关闭连接
+	// 关闭连接（指针比对，避免误删期间新建立的连接）
+	userOffline := false
 	h.mu.Lock()
-	if currentClient, exists := h.clients[userID]; exists && currentClient == client {
-		delete(h.clients, userID)
-		client.closeSend()
-		utils.LogDebug("✅ [Hub] 用户 %d 已被强制下线", userID)
+	if devices, exists := h.clients[userID]; exists {
+		if currentClient, ok := devices[device]; ok && currentClient == client {
+			delete(devices, device)
+			client.closeSend()
+			if len(devices) == 0 {
+				delete(h.clients, userID)
+				userOffline = true
+			}
+			utils.LogDebug("✅ [Hub] 用户 %d(%s) 已被强制下线", userID, device)
+		}
 	}
 	h.mu.Unlock()
 
-	// 触发离线回调
-	if h.OnUserOffline != nil {
+	// 用户所有设备都下线后才触发离线回调
+	if userOffline && h.OnUserOffline != nil {
 		go h.OnUserOffline(userID)
 	}
 
@@ -379,9 +432,11 @@ func (h *Hub) ForceLogoutUser(userID int, reason string) bool {
 func (h *Hub) CheckHeartbeat() {
 	h.mu.RLock()
 	var disconnectedClients []*Client
-	for _, client := range h.clients {
-		if client.IncrementMissedPings() >= 2 {
-			disconnectedClients = append(disconnectedClients, client)
+	for _, devices := range h.clients {
+		for _, client := range devices {
+			if client.IncrementMissedPings() >= 2 {
+				disconnectedClients = append(disconnectedClients, client)
+			}
 		}
 	}
 	h.mu.RUnlock()
@@ -390,11 +445,18 @@ func (h *Hub) CheckHeartbeat() {
 		return
 	}
 
+	var offlineUserIDs []int
 	h.mu.Lock()
 	for _, client := range disconnectedClients {
 		// 指针比对：期间该用户可能已用新连接顶替，不能误删新连接
-		if current, ok := h.clients[client.UserID]; ok && current == client {
-			delete(h.clients, client.UserID)
+		devices := h.clients[client.UserID]
+		if current, ok := devices[client.Device]; ok && current == client {
+			delete(devices, client.Device)
+			// 该用户所有设备都断开时才算离线
+			if len(devices) == 0 {
+				delete(h.clients, client.UserID)
+				offlineUserIDs = append(offlineUserIDs, client.UserID)
+			}
 		}
 	}
 	h.mu.Unlock()
@@ -402,9 +464,10 @@ func (h *Hub) CheckHeartbeat() {
 	// 在锁外关闭连接并触发离线回调
 	for _, client := range disconnectedClients {
 		client.closeSend()
-
-		if h.OnUserOffline != nil {
-			go h.OnUserOffline(client.UserID)
+	}
+	if h.OnUserOffline != nil {
+		for _, userID := range offlineUserIDs {
+			go h.OnUserOffline(userID)
 		}
 	}
 }

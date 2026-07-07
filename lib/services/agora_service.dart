@@ -80,7 +80,15 @@ class AgoraService {
   int? _minimizedGroupId;
 
   // ====================== 回调（与旧适配层一致） ======================
+  // ⚠️ onCallStateChanged 是单一委托，CallPage 打开时会整个覆盖它——
+  // 需要持续监听通话状态的长生命周期页面（如 HomePage 的连接遮盖层/悬浮按钮）
+  // 必须用 addCallStateListener 注册，否则通话结束事件会被 CallPage 抢走收不到。
   Function(CallState)? onCallStateChanged;
+  final Set<void Function(CallState)> _callStateListeners = {};
+  void addCallStateListener(void Function(CallState) listener) =>
+      _callStateListeners.add(listener);
+  void removeCallStateListener(void Function(CallState) listener) =>
+      _callStateListeners.remove(listener);
   Function(int uid)? onRemoteUserJoined;
   Function(int uid)? onRemoteUserLeft;
   Function(String)? onError;
@@ -1011,6 +1019,13 @@ class AgoraService {
   void _setState(CallState state) {
     _callState = state;
     onCallStateChanged?.call(state);
+    for (final l in List.of(_callStateListeners)) {
+      try {
+        l(state);
+      } catch (e) {
+        logger.error('📞 [Agora] 通话状态监听器异常: $e');
+      }
+    }
   }
 
   int _asInt(dynamic v) {

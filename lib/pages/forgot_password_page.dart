@@ -156,7 +156,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
         height: double.infinity,
         decoration: const BoxDecoration(
           image: DecorationImage(
-            image: AssetImage('assets/登录/背景图.png'),
+            image: AssetImage('assets/登录/背景图.jpg'),
             fit: BoxFit.cover,
           ),
         ),

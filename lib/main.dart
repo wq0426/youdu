@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -426,25 +428,37 @@ class _InitialRouteCheckerState extends State<_InitialRouteChecker> {
       // 获取最近一次登录的用户ID
       final lastUserId = await Storage.getLastLoggedInUserId();
       
+      final isDesktop =
+          Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
       if (lastUserId != null) {
-        // 检查是否勾选了自动登录
-        final autoLogin = await Storage.getAutoLogin(lastUserId);
+        if (isDesktop) {
+          // 🔴 PC端只允许扫码登录，不再使用账号密码自动登录
+          // （密码登录会占用手机端的 active_token，把手机踢下线）
+          // 上次扫码登录保存的 desktop token 仍有效时直接进入主页
+          final success = await _tryDesktopTokenLogin(lastUserId);
+          if (success) {
+            return; // token有效，已跳转到主页
+          }
+        } else {
+          // 检查是否勾选了自动登录
+          final autoLogin = await Storage.getAutoLogin(lastUserId);
 
-        if (autoLogin) {
-          // 获取保存的账号密码
-          final savedAccount = await Storage.getSavedAccountForLastUser();
-          final savedPassword = await Storage.getSavedPasswordForLastUser();
+          if (autoLogin) {
+            // 获取保存的账号密码
+            final savedAccount = await Storage.getSavedAccountForLastUser();
+            final savedPassword = await Storage.getSavedPasswordForLastUser();
 
-          if (savedAccount != null && savedAccount.isNotEmpty &&
-              savedPassword != null && savedPassword.isNotEmpty) {
-            // 尝试自动登录
-            final success = await _performAutoLogin(savedAccount, savedPassword);
-            if (success) {
-              return; // 自动登录成功，已跳转到主页
+            if (savedAccount != null && savedAccount.isNotEmpty &&
+                savedPassword != null && savedPassword.isNotEmpty) {
+              // 尝试自动登录
+              final success = await _performAutoLogin(savedAccount, savedPassword);
+              if (success) {
+                return; // 自动登录成功，已跳转到主页
+              }
             }
           }
         }
-
       }
 
       // 未自动登录：先进入引导页（图1-6），由"Start Messaging"进入登录页
@@ -458,6 +472,46 @@ class _InitialRouteCheckerState extends State<_InitialRouteChecker> {
       if (mounted) {
         Navigator.of(context).pushReplacementNamed('/onboarding');
       }
+    }
+  }
+
+  /// PC端：校验上次扫码登录保存的 desktop token，仍有效则直接进入主页
+  /// 🔴 用原生 http 调用而不走 ApiService.get：
+  /// token 失效返回 401 时 ApiService 会触发全局强制登出流程，启动阶段不需要
+  Future<bool> _tryDesktopTokenLogin(int lastUserId) async {
+    try {
+      final token = await Storage.getToken();
+      if (token == null || token.isEmpty) {
+        return false;
+      }
+
+      final response = await http.get(
+        Uri.parse(ApiConfig.getApiUrl(ApiConfig.userProfile)),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode != 200) {
+        logger.debug('ℹ️ PC端保存的token已失效(${response.statusCode})，进入扫码登录');
+        return false;
+      }
+      final data = json.decode(utf8.decode(response.bodyBytes));
+      if (data['code'] != 0) {
+        return false;
+      }
+
+      // 重新初始化日志系统（使用用户ID）
+      await logger.init(userId: lastUserId.toString());
+
+      // PC端：使用保存的路由或默认主页
+      final lastRoute = await Storage.getLastPageRoute(lastUserId);
+      logger.info('✅ PC端token有效，自动进入 ${lastRoute ?? '/home'}');
+      if (mounted) {
+        Navigator.of(context).pushReplacementNamed(lastRoute ?? '/home');
+      }
+      return true;
+    } catch (e) {
+      logger.debug('ℹ️ PC端token自动登录校验失败: $e，进入扫码登录');
+      return false;
     }
   }
 

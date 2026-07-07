@@ -91,7 +91,8 @@ class _MobileContactsPageState extends State<MobileContactsPage>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this, initialIndex: 2);
+    // 添加联系人已免审批，移除"新联系人（待审核）"Tab：群通知/联系人/群组，默认停在联系人
+    _tabController = TabController(length: 3, vsync: this, initialIndex: 1);
 
     // 🔴 同步加载缓存数据
     final bool hasCache = _isCacheValid();
@@ -721,33 +722,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     }
   }
 
-  // 新联系人（待审核的联系人）
-  List<ContactModel> get _filteredNewContacts {
-    // 使用已存储的当前用户ID，如果为空则返回空列表
-    if (_currentUserId == null) return [];
-    
-    // 待处理的联系人：别人发给我待我审核的 + 我发出等待对方审核的
-    var pendingContacts = _contacts
-        .where((c) =>
-            c.isPendingForUser(_currentUserId!) ||
-            c.isWaitingForApproval(_currentUserId!))
-        .toList();
-    
-    // 按名称首字母排序
-    pendingContacts = SortHelper.sortContactsByName(
-      pendingContacts,
-      (contact) => contact.displayName,
-    );
-    
-    if (_searchText.isEmpty) return pendingContacts;
-
-    return pendingContacts.where((contact) {
-      final name = (contact.fullName ?? contact.username).toLowerCase();
-      final search = _searchText.toLowerCase();
-      return name.contains(search);
-    }).toList();
-  }
-
   // 待审核的群组成员
   List<Map<String, dynamic>> get _filteredPendingMembers {
     if (_searchText.isEmpty) return _pendingGroupMembers;
@@ -798,20 +772,14 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     }).toList();
   }
 
-  // 通知父组件待审核数量变化
+  // 通知父组件待审核数量变化（添加联系人已免审批，仅统计群通知）
   void _notifyPendingCount() {
     if (widget.onPendingCountChanged != null) {
-      final newContactCount = _currentUserId != null 
-          ? _contacts.where((c) => c.isPendingForUser(_currentUserId!)).length 
-          : 0;
       final groupNotificationCount = _pendingGroupMembers.length;
-      final totalCount = newContactCount + groupNotificationCount;
 
-      logger.debug(
-        '📊 通讯录待审核数量 - 新联系人: $newContactCount, 群通知: $groupNotificationCount, 总计: $totalCount',
-      );
+      logger.debug('📊 通讯录待审核数量 - 群通知: $groupNotificationCount');
 
-      widget.onPendingCountChanged!(totalCount);
+      widget.onPendingCountChanged!(groupNotificationCount);
     }
   }
 
@@ -1020,40 +988,22 @@ class _MobileContactsPageState extends State<MobileContactsPage>
 
     switch (code) {
       case 0:
+        // 添加成功（免审批直接成为联系人），刷新联系人列表
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('好友请求已发送')),
+          const SnackBar(content: Text('已添加为联系人')),
         );
-        break;
-      case 2:
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('已向该联系人发起过申请，请耐心等待'),
-            duration: Duration(seconds: 3),
-          ),
-        );
+        _clearCache();
+        _loadContacts();
         break;
       case 3:
+        // 已是联系人
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(message)),
         );
         break;
-      case 5:
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(message),
-            duration: const Duration(seconds: 4),
-          ),
-        );
-        break;
       default:
-        String displayMessage = message;
-        if (message.contains('待') ||
-            message.contains('审核') ||
-            message.contains('pending')) {
-          displayMessage = '已向该联系人发起过申请，请耐心等待';
-        }
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(displayMessage)),
+          SnackBar(content: Text(message)),
         );
     }
   }
@@ -1122,12 +1072,9 @@ class _MobileContactsPageState extends State<MobileContactsPage>
           color: c.surface,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              // 计算每个tab的宽度
+              // 计算每个tab的宽度（免审批后剩3个tab，均分）
               final double totalWidth = constraints.maxWidth;
-              final double firstTabWidth =
-                  (totalWidth / 4) + 32; // 第一个tab额外加32像素
-              final double otherTabWidth =
-                  (totalWidth - firstTabWidth) / 3; // 其他3个tab均分剩余空间
+              final double otherTabWidth = totalWidth / 3;
 
               return TabBar(
                 controller: _tabController,
@@ -1138,37 +1085,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
                 isScrollable: true,
                 tabAlignment: TabAlignment.center,
                 tabs: [
-                  Tab(
-                    child: SizedBox(
-                      width: firstTabWidth,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(AppLocalizations.of(context).translate('new_contacts')),
-                          if (_filteredNewContacts.isNotEmpty)
-                            Container(
-                              margin: const EdgeInsets.only(left: 4),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.red,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                '${_filteredNewContacts.length}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
                   Tab(
                     child: SizedBox(
                       width: otherTabWidth,
@@ -1225,9 +1141,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
             child: TabBarView(
               controller: _tabController,
               children: [
-                // 新联系人列表
-                _buildNewContactsList(),
-
                 // 群通知列表
                 _buildPendingMembersList(),
 
@@ -1241,82 +1154,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
           ),
         ),
       ],
-    );
-  }
-
-  // 新联系人列表（待审核的联系人）
-  Widget _buildNewContactsList() {
-    final c = AppColors.of(context);
-    if (_isLoadingContacts) {
-      return Container(
-        color: c.scaffold,
-        child: const Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    if (_contactsError != null) {
-      return Container(
-        color: c.scaffold,
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.error_outline, size: 48, color: c.secondaryText),
-              const SizedBox(height: 16),
-              Text(_contactsError!, style: TextStyle(color: c.secondaryText)),
-              const SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: _loadContacts,
-                child: Text(AppLocalizations.of(context).translate('retry')),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    final contacts = _filteredNewContacts;
-
-    if (contacts.isEmpty) {
-      return Container(
-        color: c.scaffold,
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.person_add_outlined,
-                size: 64,
-                color: c.secondaryText,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                _searchText.isEmpty
-                    ? AppLocalizations.of(context).translate('no_new_contacts')
-                    : AppLocalizations.of(context).translate('no_search_contacts_results'),
-                style: TextStyle(color: c.secondaryText, fontSize: 16),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      color: c.scaffold,
-      child: RefreshIndicator(
-        onRefresh: () async {
-          // 🔴 优先调用网络刷新方法（包含网络重连）
-          await _onRefresh();
-        },
-        child: ListView.builder(
-          itemCount: contacts.length,
-          itemBuilder: (context, index) {
-            final contact = contacts[index];
-            return _buildNewContactItem(contact);
-          },
-        ),
-      ),
     );
   }
 
@@ -1812,90 +1649,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
     );
   }
 
-  // 新联系人项（待审核，带审核按钮）
-  Widget _buildNewContactItem(ContactModel contact) {
-    final c = AppColors.of(context);
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      leading: CircleAvatar(
-        radius: 24,
-        backgroundColor: contact.avatar.isNotEmpty
-            ? Colors.transparent
-            : const Color(0xFFFAAD14),
-        backgroundImage: contact.avatar.isNotEmpty
-            ? NetworkImage(contact.avatar)
-            : null,
-        child: contact.avatar.isEmpty
-            ? Text(
-                (contact.fullName ?? contact.username).isNotEmpty
-                    ? (contact.fullName ?? contact.username)[0].toUpperCase()
-                    : '?',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                ),
-              )
-            : null,
-      ),
-      title: Text(
-        contact.fullName ?? contact.username,
-        style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 16),
-      ),
-      subtitle: contact.department != null && contact.department!.isNotEmpty
-          ? Text(
-              contact.department!,
-              style: TextStyle(color: c.secondaryText, fontSize: 14),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            )
-          : null,
-      trailing: _currentUserId != null && contact.isPendingForUser(_currentUserId!)
-          // 别人发给我的请求：显示审核按钮
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // 拒绝按钮
-                ElevatedButton(
-                  onPressed: () => _handleContactApproval(contact, 'rejected'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.grey[300],
-                    foregroundColor: Colors.black87,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    minimumSize: const Size(60, 32),
-                  ),
-                  child: Text(AppLocalizations.of(context).translate('reject'), style: const TextStyle(fontSize: 12)),
-                ),
-                const SizedBox(width: 8),
-                // 通过按钮
-                ElevatedButton(
-                  onPressed: () => _handleContactApproval(contact, 'approved'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF4A90E2),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    minimumSize: const Size(60, 32),
-                  ),
-                  child: Text(AppLocalizations.of(context).translate('approve'), style: const TextStyle(fontSize: 12)),
-                ),
-              ],
-            )
-          // 我发出的请求：显示等待审核标签
-          : Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFE3F2FD),
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: const Color(0xFFBBDEFB), width: 1),
-              ),
-              child: const Text(
-                '等待审核',
-                style: TextStyle(fontSize: 12, color: Color(0xFF1976D2)),
-              ),
-            ),
-    );
-  }
-
   // 待审核群组成员项
   Widget _buildPendingMemberItem(Map<String, dynamic> member) {
     final displayName = member['displayName'] as String;
@@ -1966,90 +1719,6 @@ class _MobileContactsPageState extends State<MobileContactsPage>
         ],
       ),
     );
-  }
-
-  // 处理联系人审核
-  Future<void> _handleContactApproval(
-    ContactModel contact,
-    String approvalStatus,
-  ) async {
-    final token = await Storage.getToken();
-    if (token == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('未登录')));
-      }
-      return;
-    }
-
-    // 🔴 乐观更新：先立即更新UI，再请求接口
-    // 1. 立即从列表中移除该联系人
-    final removedContact = contact;
-    if (mounted) {
-      setState(() {
-        _contacts.removeWhere((c) => c.relationId == contact.relationId);
-      });
-      // 立即通知待审核数量变化
-      _notifyPendingCount();
-      // 显示操作提示
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(approvalStatus == 'approved' ? '已通过' : '已拒绝'),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-      
-      // 🔴 关键：更新未读数量缓存，将该联系人的未读数设为1
-      // 这样会话列表中会显示红色气泡
-      final unreadKey = 'user_${contact.friendId}';
-      MobileHomePage.updateUnreadCount(unreadKey, 1);
-      logger.debug('✅ 已更新未读数量缓存: $unreadKey -> 1');
-      
-      // 🔴 刷新会话列表，使红色气泡立即显示
-      MobileChatListPage.needRefresh();
-      logger.debug('📢 已通知会话列表刷新');
-    }
-
-    // 2. 异步请求接口
-    try {
-      final response = await ApiService.updateContactApprovalStatus(
-        token: token,
-        relationId: contact.relationId,
-        approvalStatus: approvalStatus,
-      );
-
-      if (response['code'] == 0) {
-        await Storage.removePendingContactForCurrentUser(contact.friendId);
-        // 🔴 更新缓存
-        _cachedContacts = List.from(_contacts);
-        _updateCacheTimestamp();
-      } else {
-        // 🔴 接口失败，回滚UI：将联系人重新添加回列表
-        logger.error('审核联系人接口失败: ${response['message']}');
-        if (mounted) {
-          setState(() {
-            _contacts.add(removedContact);
-          });
-          _notifyPendingCount();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(response['message'] ?? '操作失败，已恢复')),
-          );
-        }
-      }
-    } catch (e) {
-      // 🔴 请求异常，回滚UI：将联系人重新添加回列表
-      logger.error('审核联系人失败: $e');
-      if (mounted) {
-        setState(() {
-          _contacts.add(removedContact);
-        });
-        _notifyPendingCount();
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('操作失败: $e，已恢复')));
-      }
-    }
   }
 
   // 处理群组成员审核

@@ -198,11 +198,11 @@ func (ctrl *AuthController) Login(c *gin.Context) {
 		return
 	}
 
-	// 🔴 单设备登录限制：踢掉旧设备
-	// 先通过WebSocket发送强制下线通知给旧设备
+	// 🔴 单设备登录限制：踢掉旧的手机端设备
+	// （PC端使用独立的 desktop_active_token，手机登录不影响PC扫码登录的会话）
 	if ctrl.hub != nil {
 		utils.LogDebug("🔴 [密码登录] 准备踢掉用户 %d 的旧设备", user.ID)
-		kicked := ctrl.hub.ForceLogoutUser(user.ID, "您的账号已在其他设备登录")
+		kicked := ctrl.hub.ForceLogoutDevice(user.ID, ws.DeviceMobile, "您的账号已在其他设备登录")
 		if kicked {
 			utils.LogDebug("✅ [密码登录] 已成功踢掉用户 %d 的旧设备", user.ID)
 		} else {
@@ -473,10 +473,9 @@ func (ctrl *AuthController) VerifyCodeLogin(c *gin.Context) {
 		return
 	}
 
-	// 🔴 单设备登录限制：踢掉旧设备
-	// 先通过WebSocket发送强制下线通知给旧设备
+	// 🔴 单设备登录限制：踢掉旧的手机端设备（PC端扫码登录会话不受影响）
 	if ctrl.hub != nil {
-		ctrl.hub.ForceLogoutUser(user.ID, "您的账号已在其他设备登录")
+		ctrl.hub.ForceLogoutDevice(user.ID, ws.DeviceMobile, "您的账号已在其他设备登录")
 	}
 
 	// 🔴 更新数据库中的active_token（使旧token失效）

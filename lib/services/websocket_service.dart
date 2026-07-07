@@ -181,7 +181,11 @@ class WebSocketService {
       }
 
       // 使用配置的WebSocket服务器地址和独立端口
-      final wsUrl = '${ApiConfig.wsBaseUrl}/ws?token=$_token';
+      // 🔴 PC端连接带 device=desktop：服务端按设备类型分槽，手机和PC同时在线互不顶号
+      final isDesktop =
+          Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+      final device = isDesktop ? 'desktop' : 'mobile';
+      final wsUrl = '${ApiConfig.wsBaseUrl}/ws?token=$_token&device=$device';
       logger.debug('🔌 [WebSocket] 连接URL: $wsUrl');
       logger.debug('🔌 [WebSocket] wsBaseUrl: ${ApiConfig.wsBaseUrl}');
       logger.debug('🔌 [WebSocket] wsProtocol: ${ApiConfig.wsProtocol}');

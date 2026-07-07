@@ -3,6 +3,7 @@ package controllers
 import (
 	"database/sql"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -199,6 +200,12 @@ func (gc *GroupController) GetGroup(c *gin.Context) {
 	groupID, err := strconv.Atoi(groupIDStr)
 	if err != nil {
 		utils.Error(c, http.StatusBadRequest, "无效的群组ID")
+		return
+	}
+	// groups.id 是 int4；客户端误传 Agora 群ID（雪花大数）时直接按不存在处理，
+	// 避免打到 Postgres 报 "out of range for type integer" 的 500
+	if groupID <= 0 || groupID > math.MaxInt32 {
+		utils.Error(c, http.StatusNotFound, "群组不存在")
 		return
 	}
 

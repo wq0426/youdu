@@ -692,6 +692,10 @@ class _MobileChatPageState extends State<MobileChatPage>
   int? _currentUserId;
   String? _token;
   String? _currentUserAvatar; // 当前用户头像
+
+  // "添加为联系人"横幅：对方是否已是联系人（null=未知/查询中，false 时聊天页顶部显示横幅）
+  bool? _isPeerContact;
+  bool _isAddingContact = false; // "添加为联系人"请求进行中
   
   // 头像缓存（用于动态更新头像）
   final Map<int, String?> _avatarCache = {};
@@ -891,6 +895,9 @@ class _MobileChatPageState extends State<MobileChatPage>
       _loadPinStatus(),
       // 🔴 新增：加载联系人备注（仅一对一聊天）
       if (!widget.isGroup && !widget.isFileAssistant) _loadContactRemark(),
+      // 检查对方是否已是联系人（非联系人时顶部显示"添加为联系人"横幅）
+      if (!widget.isGroup && !widget.isFileAssistant && widget.userId > 0)
+        _checkPeerContactRelation(),
       if (mounted) _markCurrentChatAsRead(),
       if (_agoraService != null && _currentUserId != null) 
         _agoraService.initialize(_currentUserId!),
@@ -898,6 +905,120 @@ class _MobileChatPageState extends State<MobileChatPage>
       if (widget.isGroup && widget.groupId != null && _token != null)
         _checkActiveGroupCall(),
     ].whereType<Future>().toList()));
+  }
+
+  /// 检查对方是否已是联系人（全平台搜索可与陌生人直接聊天，非联系人时显示"添加为联系人"横幅）
+  Future<void> _checkPeerContactRelation() async {
+    if (widget.isGroup || widget.isFileAssistant || widget.userId <= 0) return;
+    if (_token == null) return;
+
+    try {
+      final response = await ApiService.getContactRelation(
+        token: _token!,
+        friendId: widget.userId,
+      );
+      if (!mounted) return;
+      if (response['code'] == 0 && response['data'] != null) {
+        setState(() {
+          _isPeerContact = response['data']['is_friend'] == true;
+        });
+      }
+    } catch (e) {
+      logger.debug('检查联系人关系失败: $e');
+    }
+  }
+
+  /// 联系人关系变更通知：若与当前聊天对象已成为联系人，实时移除"添加为联系人"横幅
+  void _handleContactStatusChangedInChat(dynamic data) {
+    if (widget.isGroup || widget.isFileAssistant || data == null) return;
+    try {
+      final statusData = data as Map<String, dynamic>;
+      if (statusData['status'] != 'approved') return;
+      final initiatorId = statusData['initiator_id'] as int?;
+      final approverId = statusData['approver_id'] as int?;
+      if (initiatorId != widget.userId && approverId != widget.userId) return;
+      // 🔵 单向可见：直加场景对方(发起方)把我加为联系人，不代表我加了对方，
+      // 我这边的"添加为联系人"横幅要保留，便于回加
+      if (statusData['direct'] == true && initiatorId == widget.userId) {
+        return;
+      }
+      setState(() => _isPeerContact = true);
+    } catch (e) {
+      logger.debug('处理聊天页联系人状态变更失败: $e');
+    }
+  }
+
+  /// 横幅点击：直接添加对方为联系人（免审批，无需对方同意）
+  Future<void> _addPeerAsContact() async {
+    if (_isAddingContact || _token == null) return;
+    setState(() => _isAddingContact = true);
+
+    try {
+      final response = await ApiService.addContactDirect(
+        token: _token!,
+        friendId: widget.userId,
+      );
+      if (!mounted) return;
+      // code 0=添加成功，3=已在联系人列表中，两种情况都视为已是联系人
+      if (response['code'] == 0 || response['code'] == 3) {
+        setState(() {
+          _isPeerContact = true;
+          _isAddingContact = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已添加 $_displayName 为联系人')),
+        );
+      } else {
+        setState(() => _isAddingContact = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(response['message']?.toString() ?? '添加联系人失败')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isAddingContact = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('添加联系人失败: $e')),
+      );
+    }
+  }
+
+  /// "添加XX为联系人"横幅（一对一聊天且对方非联系人时显示在页面顶部）
+  Widget _buildAddContactBanner() {
+    final c = AppColors.of(context);
+    return Container(
+      width: double.infinity,
+      color: c.appBar,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '$_displayName 还不是你的联系人',
+              style: TextStyle(fontSize: 13, color: c.secondaryText),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton.icon(
+            onPressed: _isAddingContact ? null : _addPeerAsContact,
+            icon: _isAddingContact
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.person_add_alt_1, size: 18),
+            label: Text('添加 $_displayName 为联系人'),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFF07C160),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 🔴 新增：检查群组是否有正在进行的通话
@@ -1210,9 +1331,13 @@ class _MobileChatPageState extends State<MobileChatPage>
               AgoraChatService().localGroupIdFor(agoraGid) ?? int.tryParse(agoraGid);
           if (localGid != widget.groupId) continue;
         } else {
-          // 单聊：只处理与当前联系人之间的消息
+          // 单聊：只处理与当前联系人之间的消息。
+          // 多端同步：同账号在其他端发出的消息会以 from=自己 回流到本端，
+          // 此时会话对端要取 to 而不是 from，否则回显消息被丢弃。
           if (chatMsg.chatType != ChatType.Chat) continue;
-          final peerId = int.tryParse(chatMsg.from ?? '') ?? 0;
+          final isEcho = chatMsg.from == AgoraChatService().currentUsername;
+          final peerId =
+              int.tryParse((isEcho ? chatMsg.to : chatMsg.from) ?? '') ?? 0;
           if (peerId != widget.userId) continue;
         }
 
@@ -1238,7 +1363,9 @@ class _MobileChatPageState extends State<MobileChatPage>
         if (exists) continue;
 
         setState(() {
-          _messages.add(model);
+          // 🔴 按时间顺序插入：离线补发/漫游同步的消息可能"晚到但时间更早"，
+          // 直接 append 会把更早的消息排到列表末尾
+          _insertMessageInOrder(model);
         });
 
         Future.delayed(const Duration(milliseconds: 100), () {
@@ -1391,6 +1518,11 @@ class _MobileChatPageState extends State<MobileChatPage>
 
         case 'group_announcement_update':
           _handleGroupAnnouncementUpdate(data);
+          break;
+
+        case 'contact_status_changed':
+          // 联系人关系变更：若与当前聊天对象已成为联系人，实时移除"添加为联系人"横幅
+          _handleContactStatusChangedInChat(data['data']);
           break;
 
         case 'message_error':
@@ -5519,13 +5651,9 @@ class _MobileChatPageState extends State<MobileChatPage>
     }
   }
 
-  // 聊天背景壁纸装饰
-  static const BoxDecoration _chatBgDecoration = BoxDecoration(
-    image: DecorationImage(
-      image: AssetImage('assets/images/chat_bg.jpg'),
-      fit: BoxFit.cover,
-    ),
-  );
+  // 聊天背景：纯色，跟随主题深浅色（按需求已去掉背景壁纸图片）
+  BoxDecoration get _chatBgDecoration =>
+      BoxDecoration(color: AppColors.of(context).chatBackground);
 
   // 群聊中根据发送者ID生成稳定的昵称颜色（仿 Telegram 多彩名称）
   static const List<Color> _senderNameColors = [
@@ -5771,6 +5899,16 @@ class _MobileChatPageState extends State<MobileChatPage>
     return true;
   }
 
+  /// 按时间顺序插入收到的消息（_messages 为旧→新升序）。
+  /// 时间相同（含同一秒）时插在后面，保持到达顺序稳定。
+  void _insertMessageInOrder(MessageModel model) {
+    int i = _messages.length;
+    while (i > 0 && _messages[i - 1].createdAt.isAfter(model.createdAt)) {
+      i--;
+    }
+    _messages.insert(i, model);
+  }
+
   // 判断是否显示时间戳
   bool _shouldShowTimestamp(
     MessageModel message,
@@ -5919,7 +6057,8 @@ class _MobileChatPageState extends State<MobileChatPage>
               ),
             ),
             const SizedBox(width: 8),
-            if (widget.isGroup && isMe) _buildAvatar(message),
+            // 自己的消息不显示头像（与 PC 端一致：群聊也只显示对方头像）
+            // if (widget.isGroup && isMe) _buildAvatar(message),
             // 多选模式复选框
             if (_isMultiSelectMode)
               Checkbox(
@@ -7228,10 +7367,10 @@ class _MobileChatPageState extends State<MobileChatPage>
       children: [
         Positioned(
           bottom: 0,
-          right: isMe ? -5 : null,
-          left: isMe ? null : -5,
+          right: isMe ? -7 : null,
+          left: isMe ? null : -7,
           child: CustomPaint(
-            size: const Size(11, 15),
+            size: const Size(14, 18),
             painter: BubbleTailPainter(color: bubbleColor, isMe: isMe),
           ),
         ),
@@ -10001,6 +10140,12 @@ class _MobileChatPageState extends State<MobileChatPage>
         bottom: false,
         child: Column(
           children: [
+            // "添加XX为联系人"横幅（一对一聊天且对方非联系人时显示）
+            if (!widget.isGroup &&
+                !widget.isFileAssistant &&
+                _isPeerContact == false)
+              _buildAddContactBanner(),
+
             // 群公告（如果有）
             if (widget.isGroup &&
                 _currentGroup != null &&

@@ -105,10 +105,17 @@ func (mc *MessageController) HandleWebSocket(c *gin.Context) {
 	}
 	utils.LogDebug("✅ [WebSocket] 连接升级成功 - UserID: %d", userID)
 
+	// 设备类型：PC端连接带 ?device=desktop，与手机连接互不顶号（扫码登录后两端同时在线）
+	device := c.Query("device")
+	if device != ws.DeviceDesktop {
+		device = ws.DeviceMobile // 兼容未传参数的旧客户端
+	}
+
 	// 创建客户端
 	wsConn := ws.NewConn(conn)
 	client := &ws.Client{
 		UserID: userID,
+		Device: device,
 		Conn:   wsConn,
 		Send:   make(chan []byte, 256),
 	}
