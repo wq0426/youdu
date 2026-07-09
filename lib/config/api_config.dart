@@ -23,7 +23,7 @@ class ApiConfig {
     } else if (Platform.isWindows) {
       return '127.0.0.1';
     } else if (Platform.isAndroid) {
-      return '192.168.1.6';
+      return '192.168.1.20';
     } else if (Platform.isMacOS) {
       return '192.168.1.20';
     } else {

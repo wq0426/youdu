@@ -13,7 +13,7 @@
   "source": {
     "path": "."
   },
-  "source_files": "Classes/**/*",
+  "source_files": "screen_retriever_macos/Classes/**/*",
   "dependencies": {
     "FlutterMacOS": []
   },
